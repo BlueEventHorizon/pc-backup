@@ -1,0 +1,53 @@
+# Defaults (safe to commit). Sourced first; override in backup.conf.local.
+#   cp backup.conf.example backup.conf.local
+
+# Absolute path to the backup destination (required).
+# This directory will contain mirror/, logs/, changes/.
+# Do not put employer/org-specific paths in tracked files.
+PC_BACKUP_ROOT=""
+
+# --- Paths under $HOME ---
+# Dest under mirror/: top-level file -> dotfiles/<name>; else strip leading '.'
+#   .zshrc         -> mirror/dotfiles/.zshrc
+#   .cursor/skills -> mirror/cursor/skills
+#   .config        -> mirror/config
+
+PC_BACKUP_DIRS=(
+  .cursor/skills
+  .cursor/rules
+  .cursor/commands
+  .agents
+  .config
+)
+
+PC_BACKUP_FILES=(
+  .zshrc
+  .zshenv
+  .bash_profile
+  .bashrc
+  .gitconfig
+  .cursor/cli-config.json
+  .cursor/argv.json
+  .claude/settings.json
+  .claude/settings.local.json
+  .claude/CLAUDE.md
+)
+
+PC_BACKUP_SECRETS=(
+  .ssh
+  .gnupg
+  .cursor/mcp.json
+  .mcp-auth
+  .npmrc
+  .zshrc.local
+)
+
+PC_BACKUP_ENCRYPT_SECRETS=1
+# PC_BACKUP_ALLOW_PLAINTEXT_SECRETS=0
+# PC_BACKUP_GPG_PASS=$(security find-generic-password -a pc-backup -s pc-backup-gpg -w)
+
+PC_BACKUP_DRY_RUN=0
+PC_BACKUP_RSYNC_DELETE=0
+
+PC_BACKUP_LAUNCH_HOUR=7
+PC_BACKUP_LAUNCH_MINUTE=30
