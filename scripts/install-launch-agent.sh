@@ -23,7 +23,17 @@ BACKUP_SCRIPT="${SCRIPT_DIR}/backup.sh"
 PLIST_LABEL="com.pc-backup"
 PLIST_PATH="${HOME}/Library/LaunchAgents/${PLIST_LABEL}.plist"
 
-chmod +x "${BACKUP_SCRIPT}" "${SCRIPT_DIR}/brewfile-update.sh"
+PATH_ENTRIES=()
+if command -v brew >/dev/null 2>&1; then
+  BREW_PREFIX="$(brew --prefix 2>/dev/null || true)"
+  if [[ -n "${BREW_PREFIX}" ]]; then
+    PATH_ENTRIES+=("${BREW_PREFIX}/bin" "${BREW_PREFIX}/sbin")
+  fi
+fi
+PATH_ENTRIES+=(/usr/local/bin /usr/bin /bin /usr/sbin /sbin)
+LAUNCH_PATH="$(IFS=:; echo "${PATH_ENTRIES[*]}")"
+
+chmod +x "${BACKUP_SCRIPT}" "${SCRIPT_DIR}/brewfile-update.sh" "${SCRIPT_DIR}/restore.sh"
 mkdir -p "${HOME}/Library/LaunchAgents"
 
 cat > "${PLIST_PATH}" <<EOF
@@ -51,7 +61,7 @@ cat > "${PLIST_PATH}" <<EOF
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <string>${LAUNCH_PATH}</string>
   </dict>
 </dict>
 </plist>
@@ -65,6 +75,7 @@ echo "Installed ${PLIST_PATH}"
 echo "Schedule: ${PC_BACKUP_LAUNCH_HOUR}:$(printf '%02d' "${PC_BACKUP_LAUNCH_MINUTE}") daily"
 echo "Logs: ~/Library/Logs/pc-backup.log"
 echo "Root: ${PC_BACKUP_ROOT}"
+echo "PATH: ${LAUNCH_PATH}"
 
 if [[ -z "${PC_BACKUP_GPG_PASS:-}" && "${PC_BACKUP_ENCRYPT_SECRETS}" == "1" ]]; then
   echo ""

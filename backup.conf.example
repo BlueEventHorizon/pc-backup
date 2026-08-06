@@ -7,11 +7,12 @@
 PC_BACKUP_ROOT=""
 
 # --- Paths under $HOME ---
-# Dest under mirror/: top-level file -> dotfiles/<name>; else strip leading '.'
-#   .zshrc         -> mirror/dotfiles/.zshrc
-#   .cursor/skills -> mirror/cursor/skills
-#   .config        -> mirror/config
-
+# Mapping (see scripts):
+#   file without /  -> mirror/dotfiles/<name>   (.zshrc)
+#   otherwise       -> strip one leading '.'   (.config -> config, .a/b -> a/b)
+#
+# Prefer whole trees (.config) over listing each tool subdir.
+# Note: .config may include caches/credentials from various apps.
 PC_BACKUP_DIRS=(
   .cursor/skills
   .cursor/rules

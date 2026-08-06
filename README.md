@@ -10,6 +10,7 @@ pc-backup/
   backup.conf.local        # 必須・gitignore（ROOT / GPG / 上書き）
   scripts/
     backup.sh
+    restore.sh
     brewfile-update.sh
     install-launch-agent.sh
 ```
@@ -54,29 +55,14 @@ PC_BACKUP_DRY_RUN=1 ./scripts/backup.sh
 
 ## 復元
 
-`MIRROR` は `$PC_BACKUP_ROOT/mirror`。
+conf のパス一覧に従い、ミラーから `$HOME` へ戻す。
 
 ```bash
-# Dotfiles / AI 資産など（必要なものだけ）
-rsync -a "$MIRROR"/dotfiles/ ~/
-rsync -a "$MIRROR"/cursor/ ~/.cursor/
-rsync -a "$MIRROR"/agents/ ~/.agents/
-rsync -a "$MIRROR"/exocortex/ ~/.exocortex/
-rsync -a "$MIRROR"/claude/ ~/.claude/
-rsync -a "$MIRROR"/config/ ~/.config/
-ln -sf ~/.cursor/skills ~/.claude/skills
-
-# Secrets
-gpg --output /tmp/secrets.tar -d "$MIRROR"/encrypted/secrets-latest.tar.gpg
-tar -xf /tmp/secrets.tar -C ~
-chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_* 2>/dev/null || true
-rm -f /tmp/secrets.tar
-
-# Homebrew
-brew bundle --file="$MIRROR"/brew/Brewfile
-
-# 再認証（ファイルでは復元不可）
-# gh auth login / AWS SSO / Slack・Atlassian MCP など
+./scripts/restore.sh --dry-run          # 確認のみ
+./scripts/restore.sh                    # 対話確認あり
+./scripts/restore.sh --yes              # 確認スキップ
+./scripts/restore.sh --yes --brew       # Homebrew も bundle
+./scripts/restore.sh --yes --no-secrets # 平文ミラーのみ
 ```
 
-Cursor User Rules（Settings）は `~/.cursor/rules` とは別なので手動再設定。
+再認証（gh / SSO / MCP 等）と Cursor User Rules（Settings）はファイルでは復元できない。

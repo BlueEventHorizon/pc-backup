@@ -19,21 +19,25 @@ if [[ -z "${PC_BACKUP_ROOT:-}" ]]; then
   echo "ERROR: PC_BACKUP_ROOT is unset. Set it in backup.conf.local." >&2
   exit 1
 fi
-if ((${#PC_BACKUP_DIRS[@]} == 0)) || ((${#PC_BACKUP_FILES[@]} == 0)) || ((${#PC_BACKUP_SECRETS[@]} == 0)); then
-  echo "ERROR: PC_BACKUP_DIRS / FILES / SECRETS must be set (see backup.conf.example)." >&2
+if ((${#PC_BACKUP_DIRS[@]} == 0)) || ((${#PC_BACKUP_FILES[@]} == 0)); then
+  echo "ERROR: PC_BACKUP_DIRS / FILES must be set (see backup.conf.example)." >&2
   exit 1
 fi
 
-# $HOME-relative -> mirror-relative
-#   .zshrc       -> dotfiles/.zshrc
-#   .foo/bar     -> foo/bar
-mirror_dest() {
+# file: .zshrc -> dotfiles/.zshrc | .a/b -> a/b
+# dir:  .config -> config | .a/b -> a/b
+mirror_dest_file() {
   local rel="${1#/}"
   if [[ "${rel}" != */* ]]; then
     printf 'dotfiles/%s\n' "${rel}"
   else
     printf '%s\n' "${rel#.}"
   fi
+}
+
+mirror_dest_dir() {
+  local rel="${1#/}"
+  printf '%s\n' "${rel#.}"
 }
 
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
@@ -45,6 +49,7 @@ CHANGES_DIR="${BACKUP_ROOT}/changes"
 META_DIR="${MIRROR}/meta"
 SECRETS_STAGING="${BACKUP_ROOT}/.staging-secrets-${TIMESTAMP}"
 LOG_FILE="${LOG_DIR}/${TIMESTAMP}.log"
+RSYNC_FAILURES=0
 
 RSYNC_OPTS=(-a --human-readable --itemize-changes)
 [[ "${PC_BACKUP_DRY_RUN}" == "1" ]] && RSYNC_OPTS+=(--dry-run)
@@ -63,6 +68,23 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
 }
 
+record_rsync() {
+  local src="$1" dest_rel="$2" change_file="$3" rc="$4"
+  if [[ "${rc}" -ne 0 ]]; then
+    log "WARN: rsync exit ${rc} for ${src}"
+    RSYNC_FAILURES=$((RSYNC_FAILURES + 1))
+  fi
+  if [[ "${PC_BACKUP_DRY_RUN}" == "1" ]]; then
+    rm -f "${change_file}"
+    return 0
+  fi
+  if [[ -s "${change_file}" ]]; then
+    log "  changes recorded: ${change_file}"
+  else
+    rm -f "${change_file}"
+  fi
+}
+
 rsync_path() {
   local src="$1" dest_rel="$2" dest="${MIRROR}/${2}"
   if [[ ! -e "${src}" ]]; then
@@ -73,15 +95,7 @@ rsync_path() {
   local change_file="${CHANGES_DIR}/${DATE_TAG}-${dest_rel//\//_}.txt" rc=0
   log "rsync: ${src} -> mirror/${dest_rel}"
   rsync "${RSYNC_OPTS[@]}" "${src}" "${dest}" > "${change_file}" 2>&1 || rc=$?
-  if [[ "${rc}" -ne 0 ]]; then
-    log "WARN: rsync exit ${rc} for ${src}"
-    cat "${change_file}" >> "${LOG_FILE}" || true
-  fi
-  if [[ -s "${change_file}" ]]; then
-    log "  changes recorded: ${change_file}"
-  else
-    rm -f "${change_file}"
-  fi
+  record_rsync "${src}" "${dest_rel}" "${change_file}" "${rc}"
 }
 
 rsync_dir() {
@@ -94,18 +108,11 @@ rsync_dir() {
   local change_file="${CHANGES_DIR}/${DATE_TAG}-${dest_rel//\//_}.txt" rc=0
   log "rsync: ${src}/ -> mirror/${dest_rel}/"
   rsync "${RSYNC_OPTS[@]}" "${src}/" "${dest}/" > "${change_file}" 2>&1 || rc=$?
-  if [[ "${rc}" -ne 0 ]]; then
-    log "WARN: rsync exit ${rc} for ${src}/"
-    cat "${change_file}" >> "${LOG_FILE}" || true
-  fi
-  if [[ -s "${change_file}" ]]; then
-    log "  changes recorded: ${change_file}"
-  else
-    rm -f "${change_file}"
-  fi
+  record_rsync "${src}/" "${dest_rel}" "${change_file}" "${rc}"
 }
 
 write_inventory() {
+  [[ "${PC_BACKUP_DRY_RUN}" == "1" ]] && return 0
   mkdir -p "${META_DIR}"
   cat > "${META_DIR}/inventory-${DATE_TAG}.json" <<EOF
 {
@@ -120,6 +127,10 @@ EOF
 }
 
 backup_secrets_bundle() {
+  if ((${#PC_BACKUP_SECRETS[@]} == 0)); then
+    log "SKIP secrets (PC_BACKUP_SECRETS empty)"
+    return 0
+  fi
   require_cmd tar
   mkdir -p "${SECRETS_STAGING}" "${MIRROR}/encrypted"
   local bundle_path="${SECRETS_STAGING}/secrets.tar"
@@ -137,6 +148,13 @@ backup_secrets_bundle() {
   done
   if [[ ${#items[@]} -eq 0 ]]; then
     log "No secrets paths found; skipping bundle"
+    rm -rf "${SECRETS_STAGING}"
+    return 0
+  fi
+
+  if [[ "${PC_BACKUP_DRY_RUN}" == "1" ]]; then
+    log "DRY-RUN: would pack ${#items[@]} secret path(s)"
+    rm -rf "${SECRETS_STAGING}"
     return 0
   fi
 
@@ -161,6 +179,7 @@ backup_secrets_bundle() {
       --symmetric --cipher-algo AES256 \
       --output "${tmp_gpg}" "${bundle_path}"
     mv -f "${tmp_gpg}" "${latest_path}"
+    rm -f "${plaintext_latest}"
     log "Encrypted secrets -> mirror/encrypted/secrets-latest.tar.gpg"
   else
     if [[ "${PC_BACKUP_ALLOW_PLAINTEXT_SECRETS}" != "1" ]]; then
@@ -174,6 +193,7 @@ backup_secrets_bundle() {
 }
 
 prune_changes() {
+  [[ "${PC_BACKUP_DRY_RUN}" == "1" ]] && return 0
   find "${CHANGES_DIR}" -type f -name '*.txt' -mtime +30 -delete 2>/dev/null || true
   find "${LOG_DIR}" -type f -name '*.log' -mtime +30 -delete 2>/dev/null || true
   find "${META_DIR}" -type f -name 'inventory-2*.json' -mtime +30 -delete 2>/dev/null || true
@@ -185,32 +205,33 @@ main() {
 
   log "=== PC backup start ==="
   log "Destination: ${BACKUP_ROOT}"
+  [[ "${PC_BACKUP_DRY_RUN}" == "1" ]] && log "Mode: dry-run"
 
   if [[ -x "${SCRIPT_DIR}/brewfile-update.sh" ]]; then
-    "${SCRIPT_DIR}/brewfile-update.sh" "${MIRROR}/brew" >> "${LOG_FILE}" 2>&1 || log "WARN: brewfile-update failed"
+    if [[ "${PC_BACKUP_DRY_RUN}" == "1" ]]; then
+      log "DRY-RUN: would refresh Brewfile"
+    else
+      "${SCRIPT_DIR}/brewfile-update.sh" "${MIRROR}/brew" >> "${LOG_FILE}" 2>&1 || log "WARN: brewfile-update failed"
+    fi
   fi
 
   local rel dest
   for rel in "${PC_BACKUP_FILES[@]}"; do
-    dest="$(mirror_dest "${rel}")"
+    dest="$(mirror_dest_file "${rel}")"
     rsync_path "${HOME}/${rel}" "${dest}"
   done
   for rel in "${PC_BACKUP_DIRS[@]}"; do
-    dest="$(mirror_dest "${rel}")"
+    dest="$(mirror_dest_dir "${rel}")"
     rsync_dir "${HOME}/${rel}" "${dest}"
   done
-
-  if [[ -d "${HOME}/.local/bin" ]]; then
-    mkdir -p "${MIRROR}/local-bin"
-    ls -la "${HOME}/.local/bin" > "${MIRROR}/local-bin/listing.txt"
-  fi
-
-  rsync_path "${PROJECT_ROOT}/README.md" "meta/pc-backup-README.md"
-  rsync_path "${PROJECT_ROOT}/backup.conf.example" "meta/backup.conf.example"
 
   backup_secrets_bundle
   write_inventory
   prune_changes
+
+  if [[ "${RSYNC_FAILURES}" -gt 0 ]]; then
+    die "completed with ${RSYNC_FAILURES} rsync failure(s)"
+  fi
 
   log "=== PC backup complete ==="
   du -sh "${MIRROR}" 2>/dev/null | tee -a "${LOG_FILE}" || true
