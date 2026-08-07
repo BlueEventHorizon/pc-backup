@@ -1,30 +1,44 @@
 #!/usr/bin/env bash
-# Restore files from the backup mirror into $HOME (conf-driven).
-set -euo pipefail
+# Restore regular files, Git repositories, secrets and Homebrew state.
+set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # shellcheck source=/dev/null
-[[ -f "${PROJECT_ROOT}/backup.conf.example" ]] && source "${PROJECT_ROOT}/backup.conf.example"
+source "${SCRIPT_DIR}/lib/config.sh"
+pc_load_config
 # shellcheck source=/dev/null
-[[ -f "${PROJECT_ROOT}/backup.conf.local" ]] && source "${PROJECT_ROOT}/backup.conf.local"
+source "${SCRIPT_DIR}/lib/common.sh"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/git-restore.sh"
 
-: "${PC_BACKUP_ENCRYPT_SECRETS:=1}"
-: "${PC_BACKUP_ALLOW_PLAINTEXT_SECRETS:=0}"
 : "${PC_BACKUP_DRY_RUN:=0}"
 : "${PC_BACKUP_RESTORE_YES:=0}"
-: "${PC_BACKUP_RESTORE_BREW:=0}"
-: "${PC_BACKUP_RESTORE_SECRETS:=1}"
+: "${PC_BACKUP_ALLOW_PLAINTEXT_SECRETS:=0}"
+
+RESTORE_FILES=0
+RESTORE_GIT=0
+RESTORE_SECRETS=0
+RESTORE_BREW=0
+SELECTION_GIVEN=0
+NO_SECRETS=0
+PC_WARNING_COUNT=0
+PC_LOG_FILE=""
 
 usage() {
   cat <<'EOF'
-Usage: restore.sh [--dry-run] [--yes] [--brew] [--no-secrets]
+Usage: restore.sh [--dry-run] [--yes] [--all] [--files] [--git]
+                  [--secrets|--no-secrets] [--brew]
 
-  --dry-run      rsync without writing (also PC_BACKUP_DRY_RUN=1)
+  --dry-run      show actions without writing
   --yes          skip interactive confirmation
-  --brew         run: brew bundle --file=$MIRROR/brew/Brewfile
-  --no-secrets   skip encrypted secrets bundle
+  --all          restore files, Git repositories and secrets
+  --files        restore regular files
+  --git          restore Git mirrors, URL-only and full repositories
+  --secrets      restore the encrypted secrets archive
+  --no-secrets   exclude secrets (useful with --all)
+  --brew         run brew bundle after file restoration
 EOF
 }
 
@@ -32,193 +46,146 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) PC_BACKUP_DRY_RUN=1 ;;
     --yes) PC_BACKUP_RESTORE_YES=1 ;;
-    --brew) PC_BACKUP_RESTORE_BREW=1 ;;
-    --no-secrets) PC_BACKUP_RESTORE_SECRETS=0 ;;
+    --all) RESTORE_FILES=1; RESTORE_GIT=1; RESTORE_SECRETS=1; SELECTION_GIVEN=1 ;;
+    --files) RESTORE_FILES=1; SELECTION_GIVEN=1 ;;
+    --git) RESTORE_GIT=1; SELECTION_GIVEN=1 ;;
+    --secrets) RESTORE_SECRETS=1; SELECTION_GIVEN=1 ;;
+    --no-secrets) RESTORE_SECRETS=0; NO_SECRETS=1 ;;
+    --brew) RESTORE_BREW=1; SELECTION_GIVEN=1 ;;
     -h|--help) usage; exit 0 ;;
-    *) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
+    *) printf 'Unknown option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
   esac
   shift
 done
 
-if [[ -z "${PC_BACKUP_ROOT:-}" ]]; then
-  echo "ERROR: PC_BACKUP_ROOT is unset. Set it in backup.conf.local." >&2
-  exit 1
-fi
-if ((${#PC_BACKUP_DIRS[@]} == 0)) || ((${#PC_BACKUP_FILES[@]} == 0)); then
-  echo "ERROR: PC_BACKUP_DIRS / FILES must be set (see backup.conf.example)." >&2
-  exit 1
+if [[ ${SELECTION_GIVEN} -eq 0 ]]; then
+  RESTORE_FILES=1
+  RESTORE_GIT=1
+  [[ ${NO_SECRETS} -eq 1 ]] || RESTORE_SECRETS=1
 fi
 
-# Keep in sync with backup.sh
-mirror_dest_file() {
-  local rel="${1#/}"
-  if [[ "${rel}" != */* ]]; then
-    printf 'dotfiles/%s\n' "${rel}"
+pc_restore_rsync_item() {
+  local source="$1" destination="$2" is_dir="$3"
+  local git_path exclude_rel
+  local git_excludes=()
+  [[ -e "${source}" ]] || { pc_warn "missing in backup: ${source}"; return 0; }
+
+  if [[ "${is_dir}" == "1" ]]; then
+    for git_path in "${PC_RESTORE_GIT_PATHS[@]}"; do
+      if [[ "${git_path}" == "${source}" ]]; then
+        pc_log "Regular restore delegated to Git mode: ${source#${PC_BACKUP_ROOT}/}"
+        return 0
+      fi
+      if [[ "${git_path}" == "${source}/"* ]]; then
+        exclude_rel="${git_path#${source}/}"
+        git_excludes+=("${exclude_rel}")
+      fi
+    done
+  fi
+
+  pc_log "rsync restore: ${source#${PC_BACKUP_ROOT}/} -> ${destination}"
+  [[ "${PC_BACKUP_DRY_RUN}" == "1" ]] && return 0
+  if [[ "${is_dir}" == "1" ]]; then
+    mkdir -p "${destination}"
+    local opts=(-a)
+    for exclude_rel in "${git_excludes[@]}"; do
+      opts+=("--exclude=/${exclude_rel}/")
+    done
+    rsync "${opts[@]}" "${source}/" "${destination}/"
   else
-    printf '%s\n' "${rel#.}"
+    mkdir -p "$(dirname -- "${destination}")"
+    rsync -a "${source}" "${destination}"
   fi
 }
 
-mirror_dest_dir() {
-  local rel="${1#/}"
-  printf '%s\n' "${rel#.}"
-}
-
-MIRROR="${PC_BACKUP_ROOT}/mirror"
-if [[ ! -d "${MIRROR}" ]]; then
-  echo "ERROR: mirror not found: ${MIRROR}" >&2
-  exit 1
-fi
-
-RSYNC_OPTS=(-a --human-readable --itemize-changes)
-[[ "${PC_BACKUP_DRY_RUN}" == "1" ]] && RSYNC_OPTS+=(--dry-run)
-RSYNC_FAILURES=0
-
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
-
-die() {
-  log "ERROR: $*"
-  exit 1
-}
-
-require_cmd() {
-  command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
-}
-
-restore_file() {
-  local rel="$1"
-  local src="${MIRROR}/$(mirror_dest_file "${rel}")"
-  local dest="${HOME}/${rel}"
-  if [[ ! -e "${src}" ]]; then
-    log "SKIP (missing in mirror): ${rel}"
-    return 0
-  fi
-  mkdir -p "$(dirname "${dest}")"
-  log "rsync: mirror/$(mirror_dest_file "${rel}") -> ~/${rel}"
-  local rc=0
-  rsync "${RSYNC_OPTS[@]}" "${src}" "${dest}" || rc=$?
-  if [[ "${rc}" -ne 0 ]]; then
-    log "WARN: rsync exit ${rc} for ${rel}"
-    RSYNC_FAILURES=$((RSYNC_FAILURES + 1))
-  fi
-}
-
-restore_dir() {
-  local rel="$1"
-  local src="${MIRROR}/$(mirror_dest_dir "${rel}")"
-  local dest="${HOME}/${rel}"
-  if [[ ! -d "${src}" ]]; then
-    log "SKIP (missing dir in mirror): ${rel}"
-    return 0
-  fi
-  mkdir -p "${dest}"
-  log "rsync: mirror/$(mirror_dest_dir "${rel}")/ -> ~/${rel}/"
-  local rc=0
-  rsync "${RSYNC_OPTS[@]}" "${src}/" "${dest}/" || rc=$?
-  if [[ "${rc}" -ne 0 ]]; then
-    log "WARN: rsync exit ${rc} for ${rel}/"
-    RSYNC_FAILURES=$((RSYNC_FAILURES + 1))
-  fi
-}
-
-restore_secrets() {
-  local gpg_path="${MIRROR}/encrypted/secrets-latest.tar.gpg"
-  local tar_path="${MIRROR}/encrypted/secrets-latest.tar"
-
-  if [[ -f "${gpg_path}" ]]; then
-    if [[ -z "${PC_BACKUP_GPG_PASS:-}" ]]; then
-      die "PC_BACKUP_GPG_PASS is unset; cannot decrypt secrets."
+pc_restore_files() {
+  local path source destination storage
+  pc_require_cmd rsync
+  for path in "${PC_BACKUP_MIRROR_PATHS[@]}"; do
+    destination="${path}"
+    storage=$(pc_visible_storage_rel "${destination}")
+    source="${PC_BACKUP_ROOT}/${storage}"
+    if [[ -d "${source}" ]]; then
+      pc_restore_rsync_item "${source}" "${destination}" 1
+    else
+      pc_restore_rsync_item "${source}" "${destination}" 0
     fi
-    require_cmd gpg
-    log "Decrypting secrets-latest.tar.gpg"
-    if [[ "${PC_BACKUP_DRY_RUN}" == "1" ]]; then
-      log "DRY-RUN: would decrypt and extract secrets into \$HOME"
-      return 0
+  done
+}
+
+pc_restore_secrets() {
+  local secret_dir encrypted plaintext tmp tmp_dir
+  secret_dir=$(pc_secret_storage_dir)
+  encrypted="${secret_dir}/encrypted-backup.tar.gpg"
+  plaintext="${secret_dir}/plaintext-backup.tar"
+  if [[ -f "${encrypted}" ]]; then
+    pc_require_cmd gpg
+    pc_require_gpg_pass \
+      || pc_die "GPG passphrase unavailable; add it to Keychain or run interactively"
+    pc_log "Decrypting secrets archive into HOME"
+    [[ "${PC_BACKUP_DRY_RUN}" == "1" ]] && return 0
+    tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/pc-backup-secrets.XXXXXX")
+    tmp="${tmp_dir}/secrets.tar"
+    trap 'rm -rf -- "${tmp_dir}"' EXIT INT TERM
+    if printf '%s' "${PC_BACKUP_GPG_PASS}" | gpg --batch --yes --pinentry-mode loopback \
+      --passphrase-fd 0 --output "${tmp}" --decrypt "${encrypted}"; then
+      pc_tar_is_safe "${tmp}" || pc_die "unsafe path found in secrets archive"
+      tar -xf "${tmp}" -C "${HOME}"
+      rm -rf -- "${tmp_dir}"
+      trap - EXIT INT TERM
+    else
+      rm -rf -- "${tmp_dir}"
+      trap - EXIT INT TERM
+      pc_die "failed to decrypt secrets"
     fi
-    local tmp
-    tmp="$(mktemp)"
-    printf '%s' "${PC_BACKUP_GPG_PASS}" | gpg --batch --yes --pinentry-mode loopback \
-      --passphrase-fd 0 \
-      --output "${tmp}" --decrypt "${gpg_path}"
-    tar -xf "${tmp}" -C "${HOME}"
-    rm -f "${tmp}"
-  elif [[ -f "${tar_path}" ]]; then
-    if [[ "${PC_BACKUP_ALLOW_PLAINTEXT_SECRETS}" != "1" ]]; then
-      die "plaintext secrets-latest.tar present but PC_BACKUP_ALLOW_PLAINTEXT_SECRETS!=1"
-    fi
-    log "WARN: using plaintext secrets-latest.tar"
-    if [[ "${PC_BACKUP_DRY_RUN}" == "1" ]]; then
-      log "DRY-RUN: would extract plaintext secrets into \$HOME"
-      return 0
-    fi
-    tar -xf "${tar_path}" -C "${HOME}"
+  elif [[ -f "${plaintext}" ]]; then
+    [[ "${PC_BACKUP_ALLOW_PLAINTEXT_SECRETS}" == "1" ]] \
+      || pc_die "plaintext secrets archive refused"
+    pc_warn "restoring plaintext secrets archive"
+    [[ "${PC_BACKUP_DRY_RUN}" == "1" ]] || tar -xf "${plaintext}" -C "${HOME}"
   else
-    log "SKIP: no secrets bundle in mirror/encrypted/"
+    pc_warn "no secrets archive found"
     return 0
   fi
 
+  [[ "${PC_BACKUP_DRY_RUN}" == "1" ]] && return 0
   if [[ -d "${HOME}/.ssh" ]]; then
     chmod 700 "${HOME}/.ssh" || true
     chmod 600 "${HOME}/.ssh"/id_* 2>/dev/null || true
     chmod 644 "${HOME}/.ssh"/*.pub 2>/dev/null || true
   fi
-  if [[ -d "${HOME}/.gnupg" ]]; then
-    chmod 700 "${HOME}/.gnupg" || true
-  fi
-  log "Secrets restored"
+  [[ ! -d "${HOME}/.gnupg" ]] || chmod 700 "${HOME}/.gnupg" || true
+}
+
+pc_restore_brew() {
+  local brewfile="${PC_BACKUP_ROOT}/.pc-backup/homebrew/Brewfile"
+  [[ -f "${brewfile}" ]] || { pc_warn "Brewfile not found"; return 0; }
+  pc_require_cmd brew
+  pc_log "brew bundle --file=${brewfile}"
+  [[ "${PC_BACKUP_DRY_RUN}" == "1" ]] || brew bundle --file="${brewfile}"
 }
 
 main() {
-  require_cmd rsync
-
-  log "=== PC restore ==="
-  log "Source: ${MIRROR}"
-  log "Target: ${HOME}"
-  [[ "${PC_BACKUP_DRY_RUN}" == "1" ]] && log "Mode: dry-run"
+  pc_validate_destination
+  pc_validate_absolute_paths PC_BACKUP_MIRROR_PATHS "${PC_BACKUP_MIRROR_PATHS[@]}"
+  [[ -d "${PC_BACKUP_ROOT}/.pc-backup" ]] || pc_die "backup metadata not found: ${PC_BACKUP_ROOT}/.pc-backup"
+  pc_log "=== PC restore ==="
+  pc_log "Source: ${PC_BACKUP_ROOT}"
+  [[ "${PC_BACKUP_DRY_RUN}" == "1" ]] && pc_log "Mode: dry-run"
 
   if [[ "${PC_BACKUP_DRY_RUN}" != "1" && "${PC_BACKUP_RESTORE_YES}" != "1" ]]; then
-    printf 'Restore into %s from %s? [y/N] ' "${HOME}" "${MIRROR}"
-    read -r ans
-    case "${ans}" in
-      y|Y|yes|YES) ;;
-      *) log "Aborted."; exit 1 ;;
-    esac
+    printf 'Restore selected data from %s? [y/N] ' "${PC_BACKUP_ROOT}"
+    read -r answer
+    case "${answer}" in y|Y|yes|YES) ;; *) pc_log "Aborted"; exit 1 ;; esac
   fi
 
-  local rel
-  for rel in "${PC_BACKUP_FILES[@]}"; do
-    restore_file "${rel}"
-  done
-  for rel in "${PC_BACKUP_DIRS[@]}"; do
-    restore_dir "${rel}"
-  done
-
-  if [[ "${PC_BACKUP_RESTORE_SECRETS}" == "1" ]]; then
-    restore_secrets
-  else
-    log "SKIP secrets (--no-secrets)"
-  fi
-
-  if [[ "${PC_BACKUP_RESTORE_BREW}" == "1" ]]; then
-    if [[ -f "${MIRROR}/brew/Brewfile" ]]; then
-      require_cmd brew
-      log "brew bundle --file=${MIRROR}/brew/Brewfile"
-      if [[ "${PC_BACKUP_DRY_RUN}" == "1" ]]; then
-        log "DRY-RUN: would run brew bundle"
-      else
-        brew bundle --file="${MIRROR}/brew/Brewfile"
-      fi
-    else
-      log "SKIP brew (no Brewfile in mirror)"
-    fi
-  fi
-
-  if [[ "${RSYNC_FAILURES}" -gt 0 ]]; then
-    die "completed with ${RSYNC_FAILURES} rsync failure(s)"
-  fi
-
-  log "=== PC restore complete ==="
-  log "Re-auth still required for tokens not stored in files."
+  pc_prepare_restore_git_paths
+  [[ ${RESTORE_FILES} -eq 0 ]] || pc_restore_files
+  [[ ${RESTORE_GIT} -eq 0 ]] || pc_restore_git
+  [[ ${RESTORE_SECRETS} -eq 0 ]] || pc_restore_secrets
+  [[ ${RESTORE_BREW} -eq 0 ]] || pc_restore_brew
+  pc_log "=== PC restore complete (${PC_WARNING_COUNT} warning(s)) ==="
+  pc_log "Re-authentication may still be required for gh, SSO and MCP sessions."
 }
 
 main "$@"

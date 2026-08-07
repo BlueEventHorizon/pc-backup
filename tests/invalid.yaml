@@ -1,0 +1,4 @@
+version: 1
+destination:
+  root: /tmp/invalid-backup
+unexpected_option: true

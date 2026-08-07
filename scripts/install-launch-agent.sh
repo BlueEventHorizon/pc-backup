@@ -6,16 +6,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # shellcheck source=/dev/null
-[[ -f "${PROJECT_ROOT}/backup.conf.example" ]] && source "${PROJECT_ROOT}/backup.conf.example"
-# shellcheck source=/dev/null
-[[ -f "${PROJECT_ROOT}/backup.conf.local" ]] && source "${PROJECT_ROOT}/backup.conf.local"
+source "${SCRIPT_DIR}/lib/config.sh"
+pc_load_config
 
 : "${PC_BACKUP_LAUNCH_HOUR:=7}"
 : "${PC_BACKUP_LAUNCH_MINUTE:=30}"
 : "${PC_BACKUP_ENCRYPT_SECRETS:=1}"
 
 if [[ -z "${PC_BACKUP_ROOT:-}" ]]; then
-  echo "ERROR: PC_BACKUP_ROOT is unset. Set it in backup.conf.local before installing." >&2
+  echo "ERROR: PC_BACKUP_ROOT is unset. Set it in backup.yaml before installing." >&2
   exit 1
 fi
 
@@ -33,7 +32,7 @@ fi
 PATH_ENTRIES+=(/usr/local/bin /usr/bin /bin /usr/sbin /sbin)
 LAUNCH_PATH="$(IFS=:; echo "${PATH_ENTRIES[*]}")"
 
-chmod +x "${BACKUP_SCRIPT}" "${SCRIPT_DIR}/brewfile-update.sh" "${SCRIPT_DIR}/restore.sh"
+chmod +x "${SCRIPT_DIR}"/*.sh
 mkdir -p "${HOME}/Library/LaunchAgents"
 
 cat > "${PLIST_PATH}" <<EOF
@@ -77,6 +76,7 @@ echo "Logs: ~/Library/Logs/pc-backup.log"
 echo "Root: ${PC_BACKUP_ROOT}"
 echo "PATH: ${LAUNCH_PATH}"
 
+pc_load_gpg_pass_from_keychain
 if [[ -z "${PC_BACKUP_GPG_PASS:-}" && "${PC_BACKUP_ENCRYPT_SECRETS}" == "1" ]]; then
   echo ""
   echo "WARN: PC_BACKUP_GPG_PASS is unset — scheduled runs will fail at secrets step."

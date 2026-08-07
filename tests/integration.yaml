@@ -1,0 +1,42 @@
+version: 1
+
+destination:
+  root: ${TEST_BACKUP_ROOT}
+  id: pc-backup-integration-test
+
+files:
+  mirror:
+    - ${TEST_HOME}/Documents
+    - ${TEST_HOME}/dev
+    - ${TEST_HOME}/dev/project/local-config.yaml
+
+git:
+  roots:
+    - ${TEST_HOME}/dev
+  default_mode: git-mirror
+  url_only:
+    - ${TEST_HOME}/dev/url-project
+  full:
+    - ${TEST_HOME}/dev/full-container
+  dirty_mode: backup
+  lfs_mode: skip
+  verify: true
+
+secrets:
+  paths:
+    - ${TEST_HOME}/.secret-data
+  encryption:
+    enabled: true
+    allow_plaintext: false
+    keychain:
+      account: pc-backup
+      service: pc-backup-gpg
+
+backup:
+  rsync_delete: false
+  retention_days: 30
+  brew: false
+
+schedule:
+  hour: 7
+  minute: 30

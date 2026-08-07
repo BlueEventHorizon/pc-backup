@@ -1,0 +1,72 @@
+version: 1
+
+destination:
+  root: /Volumes/BackupDisk/mac-backup
+  id: my-mac-backup-v1
+
+files:
+  # git.rootsと重なってもよい。検出したGitリポジトリは通常コピーから除外し、git設定で保存する。
+  # Gitリポジトリ内の特定ファイルをここに直接書けば、そのファイルは別途コピーする。
+  mirror:
+    - ~/Documents
+    - ~/Desktop
+
+git:
+  # これらのディレクトリ配下からGitリポジトリを探索する。
+  roots:
+    - ~/data/dev
+    - ~/Developer
+
+  # 通常は作業ファイルをコピーせず、チェックアウトなしの.git/ミラーにする。
+  default_mode: git-mirror
+
+  # default_modeの例外。各値はGitリポジトリ自体の正確なパスを指定する。
+  # url_only: URLと配置情報だけ保存する。ローカル状態があればgit-mirrorへ自動昇格する。
+  url_only: []
+
+  # full: 作業ディレクトリを完全コピーする例外。リポジトリ自体または複数リポジトリを含む親DIRを指定できる。
+  # .git/、未コミット、未追跡、gitignore対象、.env、node_modules、.build等も含む。
+  # 例: full: [${HOME}/data/dev/local-only-project, ${HOME}/data/dev/worktrees]
+  full: []
+
+  # skip: バックアップしないリポジトリ。
+  skip: []
+
+  # Gitリポジトリ探索時に中へ入らないディレクトリ名。
+  # fullの完全コピー内容からは除外されない。
+  exclude_names:
+    - node_modules
+    - .venv
+    - DerivedData
+    - .build
+    - build
+    - dist
+    - .cache
+
+  # backup: 未コミット差分と未追跡ファイルも保存。warn: 警告のみ。fail: 失敗にする。
+  dirty_mode: backup # backup | warn | fail
+
+  # local: ローカルLFS objectsもコピー。warn: 警告のみ。skip: 確認しない。
+  lfs_mode: local # local | warn | skip
+  verify: true
+
+secrets:
+  paths:
+    - ~/.ssh
+    - ~/.gnupg
+
+  encryption:
+    enabled: true
+    allow_plaintext: false
+    keychain:
+      account: pc-backup
+      service: pc-backup-gpg
+
+backup:
+  rsync_delete: false
+  retention_days: 30
+  brew: true
+
+schedule:
+  hour: 7
+  minute: 30

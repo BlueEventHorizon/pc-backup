@@ -1,2 +1,6 @@
-backup.conf.local
+.DS_Store
+backup.yaml
+backup.yml
+.venv/
+__pycache__/
 *.log

@@ -6,12 +6,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # shellcheck source=/dev/null
-[[ -f "${PROJECT_ROOT}/backup.conf.example" ]] && source "${PROJECT_ROOT}/backup.conf.example"
-# shellcheck source=/dev/null
-[[ -f "${PROJECT_ROOT}/backup.conf.local" ]] && source "${PROJECT_ROOT}/backup.conf.local"
+source "${SCRIPT_DIR}/lib/config.sh"
+pc_load_config
 
 if [[ -z "${PC_BACKUP_ROOT:-}" ]]; then
-  echo "ERROR: PC_BACKUP_ROOT is unset. Set it in backup.conf.local." >&2
+  echo "ERROR: PC_BACKUP_ROOT is unset. Set it in backup.yaml." >&2
   exit 1
 fi
 
@@ -20,7 +19,7 @@ if ! command -v brew >/dev/null 2>&1; then
   exit 1
 fi
 
-BREW_DIR="${1:-${PC_BACKUP_ROOT}/mirror/brew}"
+BREW_DIR="${1:-${PC_BACKUP_ROOT}/.pc-backup/homebrew}"
 BREWFILE="${BREW_DIR}/Brewfile"
 mkdir -p "${BREW_DIR}"
 

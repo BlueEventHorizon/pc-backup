@@ -1,240 +1,303 @@
 #!/usr/bin/env bash
-# Differential backup via rsync mirror + encrypted secrets bundle.
-set -euo pipefail
+# Rule-based Mac backup: regular files, Git mirrors, encrypted secrets and Brewfile.
+set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # shellcheck source=/dev/null
-[[ -f "${PROJECT_ROOT}/backup.conf.example" ]] && source "${PROJECT_ROOT}/backup.conf.example"
+source "${SCRIPT_DIR}/lib/config.sh"
+pc_load_config
 # shellcheck source=/dev/null
-[[ -f "${PROJECT_ROOT}/backup.conf.local" ]] && source "${PROJECT_ROOT}/backup.conf.local"
+source "${SCRIPT_DIR}/lib/common.sh"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/git-backup.sh"
 
 : "${PC_BACKUP_ENCRYPT_SECRETS:=1}"
 : "${PC_BACKUP_ALLOW_PLAINTEXT_SECRETS:=0}"
 : "${PC_BACKUP_DRY_RUN:=0}"
 : "${PC_BACKUP_RSYNC_DELETE:=0}"
+: "${PC_BACKUP_RETENTION_DAYS:=30}"
 
-if [[ -z "${PC_BACKUP_ROOT:-}" ]]; then
-  echo "ERROR: PC_BACKUP_ROOT is unset. Set it in backup.conf.local." >&2
-  exit 1
-fi
-if ((${#PC_BACKUP_DIRS[@]} == 0)) || ((${#PC_BACKUP_FILES[@]} == 0)); then
-  echo "ERROR: PC_BACKUP_DIRS / FILES must be set (see backup.conf.example)." >&2
-  exit 1
-fi
+PC_BACKUP_TIMESTAMP="$(pc_timestamp)"
+PC_BACKUP_STARTED_AT="$(pc_iso_time)"
+PC_BACKUP_FAILURES=0
+PC_WARNING_COUNT=0
+PC_LOCK_DIR=""
+PC_WORK_DIR=""
+PC_LOG_FILE=""
 
-# file: .zshrc -> dotfiles/.zshrc | .a/b -> a/b
-# dir:  .config -> config | .a/b -> a/b
-mirror_dest_file() {
-  local rel="${1#/}"
-  if [[ "${rel}" != */* ]]; then
-    printf 'dotfiles/%s\n' "${rel}"
-  else
-    printf '%s\n' "${rel#.}"
+cleanup() {
+  local rc=$?
+  pc_release_lock
+  if [[ -n "${PC_WORK_DIR:-}" && -d "${PC_WORK_DIR}" ]]; then
+    rm -rf -- "${PC_WORK_DIR}"
   fi
+  exit "${rc}"
+}
+trap cleanup EXIT INT TERM
+
+pc_record_file_manifest() {
+  local source="$1" storage="$2" method="$3" status="$4"
+  {
+    printf '{"source":'; pc_json_string "${source}"
+    printf ',"storage_path":'; pc_json_string "${storage}"
+    printf ',"method":'; pc_json_string "${method}"
+    printf ',"status":'; pc_json_string "${status}"
+    printf '}\n'
+  } >> "${PC_MANIFEST_FILES_FILE}"
 }
 
-mirror_dest_dir() {
-  local rel="${1#/}"
-  printf '%s\n' "${rel#.}"
-}
+pc_rsync_item() {
+  local source="$1" destination="$2" storage_rel="$3" is_dir="$4"
+  local change_file rc=0 source_real="" repo exclude_rel
+  local git_excludes=()
+  if [[ ! -e "${source}" ]]; then
+    pc_warn "missing source: ${source}"
+    pc_record_file_manifest "${source}" "${storage_rel}" "mirror" "missing"
+    return 0
+  fi
 
-TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
-DATE_TAG="$(date +%Y%m%d)"
-BACKUP_ROOT="${PC_BACKUP_ROOT}"
-MIRROR="${BACKUP_ROOT}/mirror"
-LOG_DIR="${BACKUP_ROOT}/logs"
-CHANGES_DIR="${BACKUP_ROOT}/changes"
-META_DIR="${MIRROR}/meta"
-SECRETS_STAGING="${BACKUP_ROOT}/.staging-secrets-${TIMESTAMP}"
-LOG_FILE="${LOG_DIR}/${TIMESTAMP}.log"
-RSYNC_FAILURES=0
+  if [[ "${is_dir}" == "1" ]]; then
+    source_real=$(pc_absolute_path "${source}" 2>/dev/null || printf '%s' "${source%/}")
+    for repo in "${PC_GIT_REPOSITORIES[@]}"; do
+      if [[ "${repo}" == "${source_real}" ]]; then
+        pc_log "Regular mirror delegated to Git mode: ${source}"
+        pc_record_file_manifest "${source}" "${storage_rel}" "mirror" "delegated-to-git"
+        return 0
+      fi
+      if [[ "${repo}" == "${source_real}/"* ]]; then
+        exclude_rel="${repo#${source_real}/}"
+        git_excludes+=("${exclude_rel}")
+      fi
+    done
+  fi
 
-RSYNC_OPTS=(-a --human-readable --itemize-changes)
-[[ "${PC_BACKUP_DRY_RUN}" == "1" ]] && RSYNC_OPTS+=(--dry-run)
-[[ "${PC_BACKUP_RSYNC_DELETE}" == "1" ]] && RSYNC_OPTS+=(--delete)
-
-log() {
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "${LOG_FILE}"
-}
-
-die() {
-  log "ERROR: $*"
-  exit 1
-}
-
-require_cmd() {
-  command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
-}
-
-record_rsync() {
-  local src="$1" dest_rel="$2" change_file="$3" rc="$4"
-  if [[ "${rc}" -ne 0 ]]; then
-    log "WARN: rsync exit ${rc} for ${src}"
-    RSYNC_FAILURES=$((RSYNC_FAILURES + 1))
+  pc_log "rsync: ${source} -> ${storage_rel}"
+  if [[ ${#git_excludes[@]} -gt 0 ]]; then
+    pc_log "rsync excludes ${#git_excludes[@]} Git repository path(s) handled by Git modes"
   fi
   if [[ "${PC_BACKUP_DRY_RUN}" == "1" ]]; then
-    rm -f "${change_file}"
+    pc_record_file_manifest "${source}" "${storage_rel}" "mirror" "dry-run"
     return 0
-  fi
-  if [[ -s "${change_file}" ]]; then
-    log "  changes recorded: ${change_file}"
   else
-    rm -f "${change_file}"
-  fi
-}
-
-rsync_path() {
-  local src="$1" dest_rel="$2" dest="${MIRROR}/${2}"
-  if [[ ! -e "${src}" ]]; then
-    log "SKIP (missing): ${src}"
-    return 0
-  fi
-  mkdir -p "$(dirname "${dest}")"
-  local change_file="${CHANGES_DIR}/${DATE_TAG}-${dest_rel//\//_}.txt" rc=0
-  log "rsync: ${src} -> mirror/${dest_rel}"
-  rsync "${RSYNC_OPTS[@]}" "${src}" "${dest}" > "${change_file}" 2>&1 || rc=$?
-  record_rsync "${src}" "${dest_rel}" "${change_file}" "${rc}"
-}
-
-rsync_dir() {
-  local src="$1" dest_rel="$2" dest="${MIRROR}/${2}"
-  if [[ ! -d "${src}" ]]; then
-    log "SKIP (missing dir): ${src}"
-    return 0
-  fi
-  mkdir -p "${dest}"
-  local change_file="${CHANGES_DIR}/${DATE_TAG}-${dest_rel//\//_}.txt" rc=0
-  log "rsync: ${src}/ -> mirror/${dest_rel}/"
-  rsync "${RSYNC_OPTS[@]}" "${src}/" "${dest}/" > "${change_file}" 2>&1 || rc=$?
-  record_rsync "${src}/" "${dest_rel}" "${change_file}" "${rc}"
-}
-
-write_inventory() {
-  [[ "${PC_BACKUP_DRY_RUN}" == "1" ]] && return 0
-  mkdir -p "${META_DIR}"
-  cat > "${META_DIR}/inventory-${DATE_TAG}.json" <<EOF
-{
-  "timestamp": "${TIMESTAMP}",
-  "hostname": "$(hostname)",
-  "user": "$(whoami)",
-  "dry_run": ${PC_BACKUP_DRY_RUN},
-  "encrypt_secrets": ${PC_BACKUP_ENCRYPT_SECRETS}
-}
-EOF
-  cp "${META_DIR}/inventory-${DATE_TAG}.json" "${META_DIR}/inventory-latest.json"
-}
-
-backup_secrets_bundle() {
-  if ((${#PC_BACKUP_SECRETS[@]} == 0)); then
-    log "SKIP secrets (PC_BACKUP_SECRETS empty)"
-    return 0
-  fi
-  require_cmd tar
-  mkdir -p "${SECRETS_STAGING}" "${MIRROR}/encrypted"
-  local bundle_path="${SECRETS_STAGING}/secrets.tar"
-  local latest_path="${MIRROR}/encrypted/secrets-latest.tar.gpg"
-  local plaintext_latest="${MIRROR}/encrypted/secrets-latest.tar"
-
-  log "Building secrets bundle"
-  local items=() rel
-  for rel in "${PC_BACKUP_SECRETS[@]}"; do
-    if [[ -e "${HOME}/${rel}" ]]; then
-      items+=("${rel}")
+    if [[ "${is_dir}" == "1" ]]; then
+      mkdir -p "${destination}"
     else
-      log "SKIP secret (missing): ${HOME}/${rel}"
+      mkdir -p "$(dirname -- "${destination}")"
+    fi
+    change_file="${PC_BACKUP_ROOT}/.pc-backup/changes/${PC_BACKUP_TIMESTAMP}-${storage_rel//\//_}.txt"
+    local opts=(-a --human-readable --itemize-changes)
+    [[ "${PC_BACKUP_RSYNC_DELETE}" == "1" && "${is_dir}" == "1" ]] && opts+=(--delete)
+    for exclude_rel in "${git_excludes[@]}"; do
+      opts+=("--exclude=/${exclude_rel}/")
+    done
+    if [[ "${is_dir}" == "1" ]]; then
+      rsync "${opts[@]}" "${source}/" "${destination}/" > "${change_file}" 2>&1 || rc=$?
+    else
+      rsync "${opts[@]}" "${source}" "${destination}" > "${change_file}" 2>&1 || rc=$?
+    fi
+    [[ -s "${change_file}" ]] || rm -f "${change_file}"
+  fi
+
+  if [[ ${rc} -ne 0 ]]; then
+    pc_warn "rsync exit ${rc}: ${source}"
+    PC_BACKUP_FAILURES=$((PC_BACKUP_FAILURES + 1))
+    pc_record_file_manifest "${source}" "${storage_rel}" "mirror" "failed"
+  else
+    pc_record_file_manifest "${source}" "${storage_rel}" "mirror" "ok"
+  fi
+}
+
+pc_backup_regular_files() {
+  local storage destination path
+
+  for path in "${PC_BACKUP_MIRROR_PATHS[@]}"; do
+    storage=$(pc_visible_storage_rel "${path}")
+    destination="${PC_BACKUP_ROOT}/${storage}"
+    if [[ -d "${path}" ]]; then
+      pc_rsync_item "${path}" "${destination}" "${storage}" 1
+    else
+      pc_rsync_item "${path}" "${destination}" "${storage}" 0
     fi
   done
-  if [[ ${#items[@]} -eq 0 ]]; then
-    log "No secrets paths found; skipping bundle"
-    rm -rf "${SECRETS_STAGING}"
-    return 0
-  fi
+}
 
+pc_secret_add_unique() {
+  local item="$1" existing
+  for existing in "${PC_SECRET_ITEMS[@]}"; do
+    [[ "${existing}" == "${item}" ]] && return 0
+  done
+  PC_SECRET_ITEMS+=("${item}")
+}
+
+pc_collect_secret_items() {
+  local path absolute home_real
+  home_real=$(cd -- "${HOME}" 2>/dev/null && pwd -P || printf '%s' "${HOME}")
+  PC_SECRET_ITEMS=()
+  for path in "${PC_BACKUP_SECRET_PATHS[@]}"; do
+    absolute=$(pc_absolute_path "${path}" 2>/dev/null || true)
+    [[ -n "${absolute}" && -e "${absolute}" ]] || { pc_warn "secret path missing: ${path}"; continue; }
+    if [[ "${absolute}" == "${HOME}/"* ]]; then
+      pc_secret_add_unique "${absolute#${HOME}/}"
+    elif [[ "${absolute}" == "${home_real}/"* ]]; then
+      pc_secret_add_unique "${absolute#${home_real}/}"
+    else
+      pc_warn "secret path must be below HOME: ${absolute}"
+      PC_BACKUP_FAILURES=$((PC_BACKUP_FAILURES + 1))
+    fi
+  done
+}
+
+pc_backup_secrets() {
+  local bundle tmp_gpg latest dated plaintext_latest secret_dir history_dir
+  pc_collect_secret_items
+  [[ ${#PC_SECRET_ITEMS[@]} -gt 0 ]] || { pc_log "Secrets: no existing paths configured"; return 0; }
+
+  pc_log "Secrets: ${#PC_SECRET_ITEMS[@]} path(s)"
   if [[ "${PC_BACKUP_DRY_RUN}" == "1" ]]; then
-    log "DRY-RUN: would pack ${#items[@]} secret path(s)"
-    rm -rf "${SECRETS_STAGING}"
+    pc_log "DRY-RUN: would create encrypted secrets archive"
     return 0
   fi
 
+  pc_require_cmd tar
+  bundle="${PC_WORK_DIR}/secrets.tar"
   (
     cd "${HOME}"
-    tar -cf "${bundle_path}" \
+    tar -cf "${bundle}" \
       --exclude='.ssh/agent' \
       --exclude='.gnupg/S.*' \
       --exclude='.gnupg/*.socket' \
-      "${items[@]}" 2>>"${LOG_FILE}"
+      "${PC_SECRET_ITEMS[@]}"
   )
 
+  secret_dir=$(pc_secret_storage_dir)
+  history_dir="${PC_BACKUP_ROOT}/.pc-backup/secrets-history"
+  mkdir -p "${secret_dir}" "${history_dir}"
+  latest="${secret_dir}/encrypted-backup.tar.gpg"
+  dated="${history_dir}/secrets-${PC_BACKUP_TIMESTAMP}.tar.gpg"
+  plaintext_latest="${secret_dir}/plaintext-backup.tar"
+
   if [[ "${PC_BACKUP_ENCRYPT_SECRETS}" == "1" ]]; then
-    require_cmd gpg
-    if [[ -z "${PC_BACKUP_GPG_PASS:-}" ]]; then
-      rm -rf "${SECRETS_STAGING}"
-      die "PC_BACKUP_GPG_PASS is unset. Refusing plaintext secrets."
-    fi
-    local tmp_gpg="${SECRETS_STAGING}/secrets.tar.gpg"
+    pc_require_cmd gpg
+    pc_require_gpg_pass 1 \
+      || pc_die "GPG passphrase unavailable; add it to Keychain or run interactively"
+    tmp_gpg="${PC_WORK_DIR}/secrets.tar.gpg"
     printf '%s' "${PC_BACKUP_GPG_PASS}" | gpg --batch --yes --pinentry-mode loopback \
-      --passphrase-fd 0 \
-      --symmetric --cipher-algo AES256 \
-      --output "${tmp_gpg}" "${bundle_path}"
-    mv -f "${tmp_gpg}" "${latest_path}"
+      --passphrase-fd 0 --symmetric --cipher-algo AES256 \
+      --output "${tmp_gpg}" "${bundle}"
+    cp "${tmp_gpg}" "${dated}"
+    cp "${tmp_gpg}" "${latest}.tmp"
+    mv "${latest}.tmp" "${latest}"
+    chmod 600 "${dated}" "${latest}"
     rm -f "${plaintext_latest}"
-    log "Encrypted secrets -> mirror/encrypted/secrets-latest.tar.gpg"
+    pc_log "Encrypted secrets: ${latest#${PC_BACKUP_ROOT}/}"
   else
-    if [[ "${PC_BACKUP_ALLOW_PLAINTEXT_SECRETS}" != "1" ]]; then
-      rm -rf "${SECRETS_STAGING}"
-      die "Plaintext secrets refused. Set PC_BACKUP_ALLOW_PLAINTEXT_SECRETS=1 or enable encryption."
-    fi
-    cp "${bundle_path}" "${plaintext_latest}"
-    log "WARN: stored plaintext secrets (explicit allow)"
+    [[ "${PC_BACKUP_ALLOW_PLAINTEXT_SECRETS}" == "1" ]] \
+      || pc_die "plaintext secrets refused; enable encryption"
+    cp "${bundle}" "${plaintext_latest}.tmp"
+    mv "${plaintext_latest}.tmp" "${plaintext_latest}"
+    chmod 600 "${plaintext_latest}"
+    pc_warn "secrets stored as plaintext by explicit configuration"
   fi
-  rm -rf "${SECRETS_STAGING}"
 }
 
-prune_changes() {
+pc_backup_brew() {
+  [[ "${PC_BACKUP_BREW:-1}" == "1" ]] || { pc_log "Brewfile: disabled"; return 0; }
+  [[ -x "${SCRIPT_DIR}/brewfile-update.sh" ]] || return 0
+  if [[ "${PC_BACKUP_DRY_RUN}" == "1" ]]; then
+    pc_log "DRY-RUN: would refresh Brewfile"
+  elif command -v brew >/dev/null 2>&1; then
+    "${SCRIPT_DIR}/brewfile-update.sh" "${PC_BACKUP_ROOT}/.pc-backup/homebrew" >> "${PC_LOG_FILE}" 2>&1 \
+      || pc_warn "Brewfile update failed"
+  else
+    pc_warn "brew not found; Brewfile skipped"
+  fi
+}
+
+pc_write_manifest() {
+  local status="success" target tmp
   [[ "${PC_BACKUP_DRY_RUN}" == "1" ]] && return 0
-  find "${CHANGES_DIR}" -type f -name '*.txt' -mtime +30 -delete 2>/dev/null || true
-  find "${LOG_DIR}" -type f -name '*.log' -mtime +30 -delete 2>/dev/null || true
-  find "${META_DIR}" -type f -name 'inventory-2*.json' -mtime +30 -delete 2>/dev/null || true
+  [[ ${PC_BACKUP_FAILURES} -eq 0 ]] || status="partial_failure"
+  if [[ ${PC_BACKUP_FAILURES} -eq 0 && ${PC_WARNING_COUNT} -gt 0 ]]; then
+    status="success_with_warnings"
+  fi
+  mkdir -p "${PC_BACKUP_ROOT}/.pc-backup/manifests"
+  tmp="${PC_WORK_DIR}/manifest.json"
+  {
+    printf '{\n  "schema_version": 1,\n  "backup_id": '; pc_json_string "${PC_BACKUP_TIMESTAMP}"
+    printf ',\n  "started_at": '; pc_json_string "${PC_BACKUP_STARTED_AT}"
+    printf ',\n  "completed_at": '; pc_json_string "$(pc_iso_time)"
+    printf ',\n  "hostname": '; pc_json_string "$(hostname)"
+    printf ',\n  "status": '; pc_json_string "${status}"
+    printf ',\n  "warnings": %s,\n  "failures": %s,\n  "repositories": ' "${PC_WARNING_COUNT}" "${PC_BACKUP_FAILURES}"
+    pc_manifest_join_array "${PC_MANIFEST_REPOS_FILE}"
+    printf ',\n  "files": '
+    pc_manifest_join_array "${PC_MANIFEST_FILES_FILE}"
+    printf '\n}\n'
+  } > "${tmp}"
+  target="${PC_BACKUP_ROOT}/.pc-backup/manifests/manifest-${PC_BACKUP_TIMESTAMP}.json"
+  cp "${tmp}" "${target}"
+  cp "${tmp}" "${PC_BACKUP_ROOT}/.pc-backup/manifests/manifest-latest.json.tmp"
+  mv "${PC_BACKUP_ROOT}/.pc-backup/manifests/manifest-latest.json.tmp" \
+    "${PC_BACKUP_ROOT}/.pc-backup/manifests/manifest-latest.json"
+}
+
+pc_prune_old_metadata() {
+  [[ "${PC_BACKUP_DRY_RUN}" == "1" ]] && return 0
+  find "${PC_BACKUP_ROOT}/.pc-backup/changes" -type f -name '*.txt' -mtime "+${PC_BACKUP_RETENTION_DAYS}" -delete 2>/dev/null || true
+  find "${PC_BACKUP_ROOT}/.pc-backup/logs" -type f -name '*.log' -mtime "+${PC_BACKUP_RETENTION_DAYS}" -delete 2>/dev/null || true
+  find "${PC_BACKUP_ROOT}/.pc-backup/manifests" -type f -name 'manifest-2*.json' -mtime "+${PC_BACKUP_RETENTION_DAYS}" -delete 2>/dev/null || true
+  find "${PC_BACKUP_ROOT}/.pc-backup/secrets-history" -type f -name 'secrets-2*.tar.gpg' -mtime "+${PC_BACKUP_RETENTION_DAYS}" -delete 2>/dev/null || true
 }
 
 main() {
-  require_cmd rsync
-  mkdir -p "${LOG_DIR}" "${CHANGES_DIR}" "${MIRROR}"
+  pc_require_cmd rsync
+  pc_validate_destination
+  pc_validate_absolute_paths PC_BACKUP_MIRROR_PATHS "${PC_BACKUP_MIRROR_PATHS[@]}"
+  pc_validate_absolute_paths PC_BACKUP_GIT_ROOTS "${PC_BACKUP_GIT_ROOTS[@]}"
+  pc_validate_absolute_paths PC_BACKUP_GIT_URL_ONLY_PATHS "${PC_BACKUP_GIT_URL_ONLY_PATHS[@]}"
+  pc_validate_absolute_paths PC_BACKUP_GIT_FULL_PATHS "${PC_BACKUP_GIT_FULL_PATHS[@]}"
+  pc_validate_absolute_paths PC_BACKUP_GIT_SKIP_PATHS "${PC_BACKUP_GIT_SKIP_PATHS[@]}"
+  pc_validate_absolute_paths PC_BACKUP_SECRET_PATHS "${PC_BACKUP_SECRET_PATHS[@]}"
+  pc_validate_source_destination_separation PC_BACKUP_MIRROR_PATHS "${PC_BACKUP_MIRROR_PATHS[@]}"
+  pc_validate_source_destination_separation PC_BACKUP_GIT_ROOTS "${PC_BACKUP_GIT_ROOTS[@]}"
+  pc_validate_source_destination_separation PC_BACKUP_SECRET_PATHS "${PC_BACKUP_SECRET_PATHS[@]}"
+  case "${PC_BACKUP_GIT_DEFAULT_MODE}" in git-mirror|git-url|git-full|skip) ;; *) pc_die "invalid PC_BACKUP_GIT_DEFAULT_MODE" ;; esac
+  case "${PC_BACKUP_GIT_DIRTY_MODE}" in backup|warn|fail) ;; *) pc_die "invalid PC_BACKUP_GIT_DIRTY_MODE" ;; esac
+  case "${PC_BACKUP_GIT_LFS_MODE}" in local|warn|skip) ;; *) pc_die "invalid PC_BACKUP_GIT_LFS_MODE" ;; esac
 
-  log "=== PC backup start ==="
-  log "Destination: ${BACKUP_ROOT}"
-  [[ "${PC_BACKUP_DRY_RUN}" == "1" ]] && log "Mode: dry-run"
-
-  if [[ -x "${SCRIPT_DIR}/brewfile-update.sh" ]]; then
-    if [[ "${PC_BACKUP_DRY_RUN}" == "1" ]]; then
-      log "DRY-RUN: would refresh Brewfile"
-    else
-      "${SCRIPT_DIR}/brewfile-update.sh" "${MIRROR}/brew" >> "${LOG_FILE}" 2>&1 || log "WARN: brewfile-update failed"
-    fi
+  if [[ "${PC_BACKUP_DRY_RUN}" == "1" ]]; then
+    PC_WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/pc-backup-dry-run.XXXXXX")
+  else
+    mkdir -p "${PC_BACKUP_ROOT}/.pc-backup/logs" "${PC_BACKUP_ROOT}/.pc-backup/changes"
+    PC_LOG_FILE="${PC_BACKUP_ROOT}/.pc-backup/logs/${PC_BACKUP_TIMESTAMP}.log"
+    PC_WORK_DIR=$(mktemp -d "${PC_BACKUP_ROOT}/.pc-backup/.work.XXXXXX")
   fi
+  PC_MANIFEST_REPOS_FILE="${PC_WORK_DIR}/repositories.jsonl"
+  PC_MANIFEST_FILES_FILE="${PC_WORK_DIR}/files.jsonl"
+  : > "${PC_MANIFEST_REPOS_FILE}"
+  : > "${PC_MANIFEST_FILES_FILE}"
 
-  local rel dest
-  for rel in "${PC_BACKUP_FILES[@]}"; do
-    dest="$(mirror_dest_file "${rel}")"
-    rsync_path "${HOME}/${rel}" "${dest}"
-  done
-  for rel in "${PC_BACKUP_DIRS[@]}"; do
-    dest="$(mirror_dest_dir "${rel}")"
-    rsync_dir "${HOME}/${rel}" "${dest}"
-  done
+  pc_acquire_lock
+  pc_log "=== PC backup start ==="
+  pc_log "Destination: ${PC_BACKUP_ROOT}"
+  [[ "${PC_BACKUP_DRY_RUN}" == "1" ]] && pc_log "Mode: dry-run"
 
-  backup_secrets_bundle
-  write_inventory
-  prune_changes
+  pc_backup_brew
+  pc_prepare_git_repositories
+  pc_backup_regular_files
+  pc_backup_git_repositories
+  pc_backup_secrets
+  pc_write_manifest
+  pc_prune_old_metadata
 
-  if [[ "${RSYNC_FAILURES}" -gt 0 ]]; then
-    die "completed with ${RSYNC_FAILURES} rsync failure(s)"
+  if [[ ${PC_BACKUP_FAILURES} -gt 0 ]]; then
+    pc_log "=== PC backup completed with ${PC_BACKUP_FAILURES} failure(s) ==="
+    return 1
   fi
-
-  log "=== PC backup complete ==="
-  du -sh "${MIRROR}" 2>/dev/null | tee -a "${LOG_FILE}" || true
+  pc_log "=== PC backup complete (${PC_WARNING_COUNT} warning(s)) ==="
+  [[ "${PC_BACKUP_DRY_RUN}" == "1" ]] || du -sh "${PC_BACKUP_ROOT}" 2>/dev/null | tee -a "${PC_LOG_FILE}" || true
 }
 
 main "$@"
