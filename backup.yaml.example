@@ -63,7 +63,7 @@ secrets:
       service: pc-backup-gpg
 
 backup:
-  rsync_delete: false
+  rsync_delete: true
   retention_days: 30
   brew: true
 

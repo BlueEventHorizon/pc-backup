@@ -1,0 +1,22 @@
+# version_config_version: 1.0
+
+targets:
+  - name: pc-backup
+    version_file: VERSION
+    version_path: version_file_line  # ファイル全体が1行のバージョン文字列
+    sync_files:
+      - path: README.md
+        pattern: "**Version: {version}**"
+        filter: "**Version: "
+
+changelog:
+  file: CHANGELOG.md
+  format: keep-a-changelog
+  git_log_auto: false
+  section_per_target: false
+
+git:
+  tag_format: "v{version}"
+  commit_message: "chore: bump version to {version}"
+  auto_tag: false
+  auto_commit: false

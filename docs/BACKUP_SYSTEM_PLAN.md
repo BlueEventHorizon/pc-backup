@@ -149,7 +149,7 @@ secrets:
       service: pc-backup-gpg
 
 backup:
-  rsync_delete: false
+  rsync_delete: true
   retention_days: 30
   brew: true
 
@@ -180,7 +180,7 @@ schedule:
 | `secrets.encryption.allow_plaintext` | boolean | `false` | 暗号化無効時の平文保存許可 |
 | `secrets.encryption.keychain.account` | string | `pc-backup` | Keychain account |
 | `secrets.encryption.keychain.service` | string | `pc-backup-gpg` | Keychain service |
-| `backup.rsync_delete` | boolean | `false` | ディレクトリミラーの`--delete` |
+| `backup.rsync_delete` | boolean | `true` | 通常ディレクトリと`git-full`の`--delete` |
 | `backup.retention_days` | integer | `30` | 日付付きメタデータ等の保持日数（1〜3650） |
 | `backup.brew` | boolean | `true` | Homebrew情報の保存 |
 | `schedule.hour` | integer | `7` | LaunchAgent実行時（0〜23） |
@@ -192,8 +192,9 @@ PyYAMLの`safe_load`を使用し、未知のキー、型、enum、時刻範囲�
 
 - `files.mirror`の各パスを`rsync -a --human-readable --itemize-changes`でコピーする。
 - ディレクトリは中身を対応する保存先ディレクトリへ同期する。
+- `rsync_delete: true`（既定）では、ディレクトリ内の削除も保存先へ反映する。
 - `rsync_delete: false`では、保存先にだけ残るファイルを削除しない。
-- `rsync_delete: true`では、ディレクトリ内の削除も保存先へ反映する。
+- この設定は`git-full`にも適用する。
 - 存在しない指定パスは警告としてマニフェストに記録する。
 - 上位で指定したシンボリックリンクがディレクトリを指す場合、保存名はYAMLの論理パスを保ち、リンク先の内容をコピーする。内部のシンボリックリンクは`rsync -a`によりリンクとして保存する。
 
@@ -540,7 +541,7 @@ tests/
 
 ## 21. 現在の制約と運用上の注意
 
-- 通常ファイルの世代スナップショットはない。`rsync_delete: true`は特に慎重に使う。
+- 通常ファイルの世代スナップショットはない。既定の`rsync_delete: true`では元で削除したファイルもミラーから削除する。
 - Git snapshot refsは自動pruneされない。
 - `verify-backup.sh`は通常ファイルの全ハッシュを照合しない。
 - gitignoreされた未追跡ファイルはGitローカル状態に含まれない。

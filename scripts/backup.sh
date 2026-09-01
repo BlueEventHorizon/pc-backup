@@ -16,7 +16,7 @@ source "${SCRIPT_DIR}/git-backup.sh"
 : "${PC_BACKUP_ENCRYPT_SECRETS:=1}"
 : "${PC_BACKUP_ALLOW_PLAINTEXT_SECRETS:=0}"
 : "${PC_BACKUP_DRY_RUN:=0}"
-: "${PC_BACKUP_RSYNC_DELETE:=0}"
+: "${PC_BACKUP_RSYNC_DELETE:=1}"
 : "${PC_BACKUP_RETENTION_DAYS:=30}"
 
 PC_BACKUP_TIMESTAMP="$(pc_timestamp)"
@@ -149,8 +149,22 @@ pc_collect_secret_items() {
   done
 }
 
+pc_collect_secret_socket_excludes() {
+  local item socket
+  PC_SECRET_SOCKET_EXCLUDES=()
+  for item in "${PC_SECRET_ITEMS[@]}"; do
+    while IFS= read -r -d '' socket; do
+      PC_SECRET_SOCKET_EXCLUDES+=("${socket}")
+    done < <(
+      cd "${HOME}"
+      find "${item}" -type s -print0
+    )
+  done
+}
+
 pc_backup_secrets() {
-  local bundle tmp_gpg latest dated plaintext_latest secret_dir history_dir
+  local bundle tmp_gpg latest dated plaintext_latest secret_dir history_dir socket
+  local tar_opts=()
   pc_collect_secret_items
   [[ ${#PC_SECRET_ITEMS[@]} -gt 0 ]] || { pc_log "Secrets: no existing paths configured"; return 0; }
 
@@ -162,9 +176,17 @@ pc_backup_secrets() {
 
   pc_require_cmd tar
   bundle="${PC_WORK_DIR}/secrets.tar"
+  pc_collect_secret_socket_excludes
+  tar_opts=(-cf "${bundle}")
+  for socket in "${PC_SECRET_SOCKET_EXCLUDES[@]}"; do
+    tar_opts+=("--exclude=${socket}")
+  done
+  if [[ ${#PC_SECRET_SOCKET_EXCLUDES[@]} -gt 0 ]]; then
+    pc_log "Secrets: excluded ${#PC_SECRET_SOCKET_EXCLUDES[@]} Unix socket(s)"
+  fi
   (
     cd "${HOME}"
-    tar -cf "${bundle}" \
+    tar "${tar_opts[@]}" \
       --exclude='.ssh/agent' \
       --exclude='.gnupg/S.*' \
       --exclude='.gnupg/*.socket' \

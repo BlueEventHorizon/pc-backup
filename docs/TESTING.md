@@ -164,6 +164,7 @@ home/.secret-data/token.txt
 3. `backup.sh`を再実行する。
 4. `verify-backup.sh`を再実行する。
 5. `refs/backup-snapshots/`に更新前refがあることを確認する。
+6. 元から削除した通常ファイルと`git-full`ファイルがミラーから削除されていることを確認する。
 
 ### 6.5 完全復元
 
