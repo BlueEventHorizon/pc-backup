@@ -30,6 +30,7 @@ fi
 mkdir -p "${TEST_HOME}/Documents" "${TEST_HOME}/dev/project" "${TEST_HOME}/.secret-data" "${GNUPGHOME}"
 chmod 700 "${GNUPGHOME}"
 printf 'document data\n' > "${TEST_HOME}/Documents/example.txt"
+printf 'remove after initial backup\n' > "${TEST_HOME}/Documents/deleted-after-first.txt"
 printf 'secret data\n' > "${TEST_HOME}/.secret-data/token.txt"
 "${TEST_PYTHON}" -c 'import socket, sys; sock = socket.socket(socket.AF_UNIX); sock.bind(sys.argv[1]); sock.close()' \
   "${TEST_HOME}/.secret-data/agent.sock"
@@ -91,6 +92,8 @@ printf 'ignored-local.txt\n' > "${TEST_HOME}/dev/full-container/full-project/.gi
 git -C "${TEST_HOME}/dev/full-container/full-project" add tracked.txt .gitignore
 git -C "${TEST_HOME}/dev/full-container/full-project" commit -qm "initial full project"
 printf 'full ignored local data\n' > "${TEST_HOME}/dev/full-container/full-project/ignored-local.txt"
+printf 'remove full data after initial backup\n' \
+  > "${TEST_HOME}/dev/full-container/full-project/deleted-after-first.txt"
 
 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/init-backup-destination.sh"
 
@@ -154,10 +157,16 @@ git -C "${TEST_HOME}/dev/project" add tracked.txt untracked.txt
 git -C "${TEST_HOME}/dev/project" commit -qm "local committed state"
 printf 'second local change\n' >> "${TEST_HOME}/dev/project/tracked.txt"
 printf 'second untracked\n' > "${TEST_HOME}/dev/project/untracked-second.txt"
+rm "${TEST_HOME}/Documents/deleted-after-first.txt"
+rm "${TEST_HOME}/dev/full-container/full-project/deleted-after-first.txt"
 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh"
 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/verify-backup.sh"
 snapshot_count=$(git -C "${mirror}" for-each-ref --count=1 refs/backup-snapshots | wc -l | tr -d ' ')
 [[ "${snapshot_count}" -gt 0 ]] || fail "pre-update Git refs were not preserved"
+[[ ! -e "${TEST_BACKUP_ROOT}/Documents/deleted-after-first.txt" ]] \
+  || fail "deleted regular file remained in backup"
+[[ ! -e "${TEST_BACKUP_ROOT}/dev/full-container/full-project/deleted-after-first.txt" ]] \
+  || fail "deleted git-full file remained in backup"
 
 mv "${TEST_HOME}" "${TEST_ROOT}/source-home"
 mkdir -p "${TEST_HOME}"

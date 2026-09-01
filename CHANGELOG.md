@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- 通常ファイルと`git-full`のミラーで、元から削除されたファイルをバックアップ先からも削除する
+
 ## [0.1.0] - 2026-09-01
 
 ### Added

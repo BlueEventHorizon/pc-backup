@@ -166,7 +166,7 @@ def main() -> int:
 
         backup = mapping(root.get("backup"), "backup")
         check_keys(backup, {"rsync_delete", "retention_days", "brew"}, "backup")
-        rsync_delete = boolean(backup.get("rsync_delete"), "backup.rsync_delete", False)
+        rsync_delete = boolean(backup.get("rsync_delete"), "backup.rsync_delete", True)
         retention_days = integer(backup.get("retention_days"), "backup.retention_days", 30, 1, 3650)
         brew = boolean(backup.get("brew"), "backup.brew", True)
 

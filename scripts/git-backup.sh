@@ -245,8 +245,11 @@ pc_backup_one_git_repo() {
       storage_rel="${mirror#${PC_BACKUP_ROOT}/}"
       pc_log "Git full rsync: ${repo} -> ${storage_rel}"
       if [[ "${PC_BACKUP_DRY_RUN:-0}" != "1" ]]; then
+        local full_rsync_opts=(-a)
+        [[ "${PC_BACKUP_RSYNC_DELETE:-1}" == "1" ]] && full_rsync_opts+=(--delete)
         mkdir -p "${mirror}" "$(dirname -- "${info_file}")"
-        rsync -a "${repo}/" "${mirror}/" || PC_BACKUP_FAILURES=$((PC_BACKUP_FAILURES + 1))
+        rsync "${full_rsync_opts[@]}" "${repo}/" "${mirror}/" \
+          || PC_BACKUP_FAILURES=$((PC_BACKUP_FAILURES + 1))
         {
           printf '%s\n' "${repo}"
           printf '%s\n' "${origin}"
