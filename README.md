@@ -1,9 +1,11 @@
 # pc-backup
 
+**Version: 0.1.0**
+
 Macのデータを性質別にバックアップ・復元するツール。
 
 - 通常ファイル: `rsync`ミラー
-- Gitプロジェクト: チェックアウトを持たない独立ミラー
+- Gitプロジェクト: 独立ミラー、URL記録、または作業ツリーの完全コピー
 - 未コミット状態: staged／unstagedパッチと未追跡ファイル
 - 機密情報: GPGによるAES-256暗号化
 - 開発環境: Homebrew `Brewfile`
@@ -54,18 +56,18 @@ make
 以下のコマンドは、すべてこのプロジェクトのルートで実行する。
 
 ```bash
-cd /Users/katsuhiko.terada/data/dev/acn-ai/pc-backup-main
+cd /path/to/pc-backup
 ```
 
 ### 2. 必要なコマンドとPython環境を準備
 
-GPGとGit LFSが未導入の場合はHomebrewでインストールする。
+暗号化バックアップを使う場合、GPGが未導入ならHomebrewでインストールする。
 
 ```bash
-brew install gnupg git-lfs
+brew install gnupg
 ```
 
-Python 3とPyYAMLを確認し、不足していれば導入する。インストール前には確認が表示される。
+Python 3.8以上とPyYAMLを確認し、不足していれば導入する。インストール前には確認が表示される。
 
 ```bash
 ./scripts/setup-dependencies.sh
@@ -101,6 +103,8 @@ data/dev/example-app/    -> Git設定で保存
 ```
 
 Gitリポジトリ内の`backup.yaml`などを`files.mirror`へファイル単位で直接指定した場合は、Gitミラーに加えてそのファイルも同じ論理位置へ保存する。
+
+HOME外の通常ファイルとGitリポジトリは`<destination>/_absolute/`以下へ絶対パス相当の階層で保存する。Secretsは安全のためHOME配下だけを指定できる。すべてのバックアップ元はバックアップ先と同一、上位、下位の関係にならないよう検証され、重なる場合は処理を中止する。
 
 ### 4. 暗号化パスフレーズをキーチェーンへ登録
 
@@ -162,7 +166,9 @@ caffeinate -i ./scripts/backup.sh
 ./scripts/verify-backup.sh
 ```
 
-`Verification complete (0 warning(s))`と表示されれば検証成功。Gitオブジェクト、JSONマニフェスト、GPG暗号化アーカイブを検査する。
+`Verification complete (0 warning(s))`と表示されれば、実装されている全検査が成功している。Gitミラーには`git fsck --full`、JSONマニフェストには構文検査、GPG暗号化アーカイブには復号とtar一覧取得を行う。元データとの完全比較、マニフェスト内容のスキーマ検証、`git-full`や通常ファイルの内容比較は行わない。
+
+パスフレーズが取得できない場合、Secrets検証は警告してスキップされるが、ほかに失敗がなければスクリプトの終了コードは0になる。したがって、終了コードだけでなく`0 warning(s)`も確認する。マニフェストはJSON構文だけを検査するため、単独で`verify-backup.sh`を実行しても、過去の`partial_failure`を内容から失敗判定することはない。
 
 ### 2回目以降
 
@@ -175,10 +181,12 @@ caffeinate -i ./scripts/backup.sh
 
 ## 必要なコマンド
 
-macOSのほか、`rsync`、`git`、`tar`、`gpg`、Python 3、PyYAMLを使用する。Homebrew情報を保存する場合は`brew`、LFSを使う場合は`git-lfs`も必要。
+macOSのほか、`rsync`、`git`、`tar`、Python 3.8以上、PyYAMLを使用する。暗号化バックアップでは`gpg`、Homebrew情報を保存・復元する場合は`brew`も必要になる。`make backup`と`make run`はスリープ抑止のためmacOSの`caffeinate`を使用する。
+
+`git.lfs_mode: local`は既にローカルに存在するLFS objectsを`rsync`するため、バックアップ処理自体は`git-lfs`コマンドを呼び出さない。ただし、復元後にLFSファイルの実体を取得・checkoutするには`git-lfs`が必要になる場合がある。
 
 ```bash
-brew install gnupg git-lfs
+brew install gnupg
 ./scripts/setup-dependencies.sh
 ```
 
@@ -191,7 +199,7 @@ brew install gnupg git-lfs
 
 Pythonが利用できれば、プロジェクト専用`.venv`を作成し、確認後にPyYAMLを`requirements.txt`からインストールする。PythonもHomebrewもない場合は、Python公式macOSインストーラーの案内を表示する。
 
-`backup.sh`などの実行時にも依存関係を確認する。不足している場合、手動実行ではインストール確認を表示する。LaunchAgentなど非対話環境では自動インストールせず、`setup-dependencies.sh`の事前実行を促して終了する。
+`backup.sh`などの実行時にもPythonとPyYAMLを確認する。不足している場合、手動実行ではインストール確認を表示する。LaunchAgentなど非対話環境では自動インストールせず、`setup-dependencies.sh`の事前実行を促して終了する。`git`、`rsync`、`tar`、`gpg`などのコマンドは自動インストールせず、必要な処理の開始時に不足していれば終了する。
 
 状態確認だけ行う場合:
 
@@ -260,7 +268,7 @@ security add-generic-password \
 
 ### バックアップ先の初期化
 
-`destination.id`を設定した場合は、初回に一度だけ実行する。
+`destination.id`を設定した場合は、初回に一度だけ実行する。`make init`と`make first-backup`はこの識別子を必須とする。識別子を設定しない構成では初期化スクリプトを使わず、バックアップ先の誤認防止チェックも行われない。
 
 ```bash
 ./scripts/init-backup-destination.sh
@@ -299,9 +307,66 @@ git:
 
 `full`に親ディレクトリを指定すると、その配下で検出したすべてのGitリポジトリに`git-full`を適用する。個別リポジトリを`skip`に入れた場合は、親の`full`より`skip`を優先する。
 
-`backup`ではstaged／unstaged差分と、gitignoreされていない未追跡ファイルを保存する。`.env`などのgitignore対象は自動保存しないため、必要なものを`secrets.paths`へ明示する。
+`dirty_mode`の動作は次のとおり。
+
+| 値 | 動作 |
+|---|---|
+| `backup` | staged／unstaged差分と、gitignoreされていない未追跡ファイルを保存する |
+| `warn` | ローカル変更を保存せず警告する。コミット済みのrefsとobjectsは設定したGitモードで保存する |
+| `fail` | ローカル変更があるリポジトリを失敗扱いにし、そのリポジトリのGit保存処理を行わない |
+
+`.env`などのgitignore対象は`dirty_mode: backup`でも自動保存しないため、必要なものを`secrets.paths`へ明示する。stashはGit refとして`git-mirror`に含まれる。
+
+そのほかのGit設定は次のとおり。
+
+- `exclude_names`: Git探索時にpruneするディレクトリ名。`git-full`のコピー内容を除外する設定ではない
+- `lfs_mode: local`: ローカルLFS objectsをミラーへコピーする
+- `lfs_mode: warn`: ローカルLFS objectsがあれば警告し、コピーしない
+- `lfs_mode: skip`: ローカルLFS objectsの確認とコピーを行わない
+- `verify: true`: 各`git-mirror`保存直後に`git fsck --full`を実行する
+
+### 機密情報と保持期間
+
+`secrets.paths`に複数のパスを指定した場合、すべてを1つのtarへまとめる。暗号化された最新版は、先頭に指定したパスに対応するバックアップ先の`encrypted-backup.tar.gpg`へ保存する。暗号化時は日付付き世代も`<destination>/.pc-backup/secrets-history/`へ保存する。
+
+秘密領域内のUnixソケットは復元可能なファイルではないため、自動的にアーカイブ対象から除外する。通常ファイル、ディレクトリ、シンボリックリンクはtarに含まれる。
+
+暗号化を無効にするには、情報漏えいを避けるため`enabled: false`と`allow_plaintext: true`の両方が必要になる。この場合は日付付き暗号化世代を作らず、最新版を`plaintext-backup.tar`として保存する。
+
+```yaml
+secrets:
+  encryption:
+    enabled: true
+    allow_plaintext: false
+```
+
+暗号化済み運用から平文運用へ切り替えても、以前の`encrypted-backup.tar.gpg`は自動削除されず、復元処理は暗号化版を優先する。方式を切り替える場合は、必要な世代を別途保全し、新しい平文バックアップを検証してから古い最新版ファイルを手動で整理する。通常運用では暗号化を無効にしないことを推奨する。
+
+`backup.retention_days`は、日付付きSecrets世代、実行ログ、rsync変更記録、日付付きマニフェストの保持日数で、既定値は30日である。最新版のSecretsと`manifest-latest.json`は削除対象にならない。Gitの`refs/backup-snapshots/`はこの設定では削除されない。
 
 ## バックアップ
+
+### 差分更新と世代管理
+
+すべての対象が同じ方式で差分バックアップされるわけではない。対象ごとの更新方法は次のとおり。
+
+| 対象 | 2回目以降の更新方法 | 補足 |
+|---|---|---|
+| 通常ファイル（`files.mirror`） | `rsync -a`で変更されたファイルだけを転送 | サイズと更新時刻を基準に比較する。通常ファイルの世代バックアップは作成しない |
+| `git-full` | `rsync -a`で変更されたファイルだけを転送 | 作業ツリー、`.git`、gitignore対象を含むディレクトリ全体が対象。削除は反映しない |
+| `git-mirror` | `git fetch`で新しいGitオブジェクトとrefsを取得 | 更新前のheads・tags・stashは`refs/backup-snapshots/`へ保存する |
+| 機密情報（`secrets.paths`） | tarアーカイブ全体を毎回作り直す | 暗号化有効時はGPG暗号化し、最新版に加えて日付付き世代を保存する |
+| Brewfile | `backup.brew: true`の場合に毎回生成または更新 | `brew`がなければ警告してスキップする |
+| マニフェスト | Dry Run以外で毎回生成または更新 | バックアップ内容と実行結果を記録する |
+
+`rsync`を使う通常ファイルと`git-full`は、未変更ファイルを再転送しない。ただし、これは変更履歴を複数世代保持する方式ではなく、バックアップ先を最新状態へ近づけるミラー方式である。また、ローカルパス間の転送では、変更されたファイルの一部分だけではなく、基本的に変更されたファイル単位で転送される。
+
+`backup.rsync_delete`は`files.mirror`でディレクトリをコピーするときだけ適用され、既定値は`false`である。この場合、元データ側で削除したファイルはバックアップ先に残る。削除も反映して完全なミラーにする場合は`true`へ変更できるが、バックアップ先だけに残っているファイルも削除されるため注意する。`git-full`はこの設定に関係なく削除を反映しない。
+
+```yaml
+backup:
+  rsync_delete: false
+```
 
 最初にdry-runで対象を確認する。
 
@@ -331,10 +396,12 @@ PC_BACKUP_DRY_RUN=1 ./scripts/backup.sh
 │   └── secret/
 │       └── encrypted-backup.tar.gpg
 ├── .pc-backup-destination
-└── .pc-backup/             # 復元対象ではない内部情報
+└── .pc-backup/             # 管理情報と復元用メタデータ
     ├── manifests/
     ├── git-state/
     ├── git-url/
+    ├── git-full/
+    ├── secrets-history/
     ├── homebrew/Brewfile
     ├── changes/
     ├── logs/
@@ -343,7 +410,17 @@ PC_BACKUP_DRY_RUN=1 ./scripts/backup.sh
 
 HOME配下の保存先はYAMLのパスと同じ階層になる。Git、暗号化などの保存方式は階層を変えず、その位置にあるデータの表現方法として扱う。
 
+### 運用上の制約
+
+- 通常ファイルと`git-full`の保存先全体を一括で切り替えるトランザクションやスナップショットはない。中断時には一部だけ更新された状態になり得る
+- OneDriveなどFile Provider配下への書き込み完了は確認するが、クラウド側への同期完了、空き容量、オンラインのみファイルの利用可能性は検証しない
+- 通常ファイルのバイト単位ハッシュやクラウド側のバージョン履歴は検証しない
+- Git snapshot refsは自動削除されないため、長期運用では保存容量を確認する
+- バックアップ設定とスクリプト自体も復元できるよう、必要なら`backup.yaml`とこのプロジェクトをバックアップ対象へ明示する
+
 ## 復元
+
+引数なしの`restore.sh`と`--all`は、通常ファイル、Git、Secretsを対象にする。Homebrewパッケージは自動では復元せず、`--brew`を明示した場合だけ`brew bundle`を実行する。Dry Runでは書き込みも確認プロンプトも行わない。
 
 全対象のdry-run:
 
@@ -367,7 +444,13 @@ HOME配下の保存先はYAMLのパスと同じ階層になる。Git、暗号化
 ./scripts/restore.sh --all --brew
 ```
 
-既存の復元先があるGitリポジトリは上書きせずスキップする。通常ファイルと秘密情報は、実行前に全体確認が表示される。確認を省略する場合だけ`--yes`を指定する。
+通常ファイルは`rsync -a`で復元し、既存ファイルを更新するが、復元先にだけ存在するファイルは削除しない。Secretsは最新版のアーカイブをHOMEへ展開し、同名ファイルを上書きする。日付付きSecrets世代を選択して復元する機能はない。
+
+既存の復元先に`.git`があるGitリポジトリは上書きせずスキップする。ただし、`files.mirror`で明示したファイルの復元などによって復元先ディレクトリが先に作られていても、`.git`がなければ一時cloneの内容をそのディレクトリへ統合し、既存の追加ファイルを残す。`git-full`と`git-url`は復元先パスが既に存在すればスキップする。
+
+`git-url`は保存されたリモートURLから復元時点の内容をcloneする方式であり、記録したHEADを必ず復元できる方式ではない。clone後のHEADが記録値と異なる場合は警告する。linked worktreeはそれぞれ独立した通常のGitリポジトリとして復元され、元のworktree共有関係は再構築しない。
+
+Dry Run以外の復元では、選択した処理全体に対して実行前に1回確認が表示される。確認を省略する場合だけ`--yes`を指定する。
 
 ## 毎日の自動実行
 
@@ -385,6 +468,8 @@ schedule:
 ./scripts/install-launch-agent.sh
 ```
 
+LaunchAgentが定刻に実行するのは`backup.sh`だけで、`verify-backup.sh`は自動実行しない。また、登録されたコマンドは`caffeinate`を使用しないため、実行中のスリープ抑止も行わない。暗号化を有効にした非対話実行ではパスフレーズを入力できないため、事前のキーチェーン登録が必須になる。プロジェクトを移動した場合はplist内のスクリプト絶対パスが変わるため、LaunchAgentを再登録する。
+
 LaunchAgentログ:
 
 ```text
@@ -400,9 +485,12 @@ LaunchAgentログ:
 
 - 通常ファイルのバックアップ・復元
 - Gitミラーの初回作成と更新
+- linked worktreeごとの独立ミラー作成と検証
+- 不整合commit-graphの自動再構築
 - 更新前Git参照の保持
 - staged／unstaged・未追跡ファイルの復元
 - GPG暗号化・検証・復号
+- UnixソケットのSecrets除外
 - JSONマニフェスト検証
 
 ```bash

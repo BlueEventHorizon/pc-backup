@@ -98,6 +98,19 @@ pc_git_snapshot_refs() {
   done < <(git -C "${mirror}" for-each-ref --format='%(objectname) %(refname)' refs/heads refs/tags refs/stash)
 }
 
+pc_git_repair_commit_graph() {
+  local mirror="$1"
+  if git -C "${mirror}" commit-graph verify >/dev/null 2>&1; then
+    return 0
+  fi
+  pc_log "Git mirror: rebuilding stale commit graph: ${mirror#${PC_BACKUP_ROOT}/}"
+  # Commit graphs are derived metadata. Remove the invalid monolithic or split
+  # graph first so Git does not consult it while walking reachable commits.
+  rm -f -- "${mirror}/objects/info/commit-graph"
+  rm -rf -- "${mirror}/objects/info/commit-graphs"
+  git -C "${mirror}" commit-graph write --reachable
+}
+
 pc_git_copy_local_lfs() {
   local repo="$1" mirror="$2" source_lfs
   [[ "${PC_BACKUP_GIT_LFS_MODE:-local}" != "skip" ]] || return 0
@@ -270,7 +283,14 @@ pc_backup_one_git_repo() {
             return 0
           fi
           pc_git_snapshot_refs "${mirror}" "${PC_BACKUP_TIMESTAMP}"
-          if ! git -C "${mirror}" fetch "${repo}" '+refs/*:refs/*'; then
+          # A fetch may start detached auto-maintenance. When many linked
+          # worktrees share one object store, its repack/MIDX update can still
+          # be running when the fsck below starts, producing transient
+          # "packfile ... cannot be accessed" failures. Backup verification
+          # needs a stable object directory, so do not launch maintenance or
+          # rewrite the commit graph from this fetch.
+          if ! git -C "${mirror}" fetch --no-auto-maintenance --no-write-commit-graph \
+            "${repo}" '+refs/*:refs/*'; then
             pc_warn "failed to update Git mirror: ${repo}"
             PC_BACKUP_FAILURES=$((PC_BACKUP_FAILURES + 1))
             return 0
@@ -283,6 +303,7 @@ pc_backup_one_git_repo() {
         git -C "${mirror}" config backup.mode git-mirror
         git -C "${mirror}" config backup.statePath ".pc-backup/git-state/${rel}"
         pc_git_copy_local_lfs "${repo}" "${mirror}"
+        pc_git_repair_commit_graph "${mirror}" || true
         if [[ "${PC_BACKUP_GIT_VERIFY:-1}" == "1" ]]; then
           if git -C "${mirror}" fsck --full >/dev/null; then
             verification="ok"

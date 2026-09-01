@@ -31,6 +31,8 @@ mkdir -p "${TEST_HOME}/Documents" "${TEST_HOME}/dev/project" "${TEST_HOME}/.secr
 chmod 700 "${GNUPGHOME}"
 printf 'document data\n' > "${TEST_HOME}/Documents/example.txt"
 printf 'secret data\n' > "${TEST_HOME}/.secret-data/token.txt"
+"${TEST_PYTHON}" -c 'import socket, sys; sock = socket.socket(socket.AF_UNIX); sock.bind(sys.argv[1]); sock.close()' \
+  "${TEST_HOME}/.secret-data/agent.sock"
 
 git -C "${TEST_HOME}/dev/project" init -q
 git -C "${TEST_HOME}/dev/project" config user.name "PC Backup Test"
@@ -45,6 +47,20 @@ printf 'untracked\n' > "${TEST_HOME}/dev/project/untracked.txt"
 printf 'local config\n' > "${TEST_HOME}/dev/project/local-config.yaml"
 printf 'local-config.yaml\n' >> "${TEST_HOME}/dev/project/.git/info/exclude"
 printf 'non-git document\n' > "${TEST_HOME}/dev/notes.txt"
+
+# Linked worktrees share the main repository's object store. Each backup
+# mirror must remain independently readable when several of them are updated
+# and verified in succession.
+mkdir -p "${TEST_HOME}/dev/worktree-main"
+git -C "${TEST_HOME}/dev/worktree-main" init -q
+git -C "${TEST_HOME}/dev/worktree-main" config user.name "PC Backup Test"
+git -C "${TEST_HOME}/dev/worktree-main" config user.email "pc-backup@example.invalid"
+git -C "${TEST_HOME}/dev/worktree-main" config commit.gpgsign false
+printf 'worktree base\n' > "${TEST_HOME}/dev/worktree-main/tracked.txt"
+git -C "${TEST_HOME}/dev/worktree-main" add tracked.txt
+git -C "${TEST_HOME}/dev/worktree-main" commit -qm "worktree initial"
+git -C "${TEST_HOME}/dev/worktree-main" worktree add -qb linked \
+  "${TEST_HOME}/dev/worktree-linked"
 
 # A newly initialized repository has an unborn branch and no HEAD commit. Its
 # untracked files must still be backed up and restored.
@@ -108,6 +124,8 @@ state="${TEST_BACKUP_ROOT}/.pc-backup/git-state/dev/project"
   || fail "unborn Git repository mirror was not created"
 [[ -f "${TEST_BACKUP_ROOT}/.pc-backup/git-state/dev/unborn-project/untracked.tar.gz" ]] \
   || fail "unborn Git repository files were not captured"
+[[ -d "${TEST_BACKUP_ROOT}/dev/worktree-linked/.git" ]] \
+  || fail "linked worktree Git mirror was not created"
 [[ -f "${TEST_BACKUP_ROOT}/.secret-data/encrypted-backup.tar.gpg" ]] \
   || fail "encrypted secrets archive was not created"
 [[ -f "${TEST_BACKUP_ROOT}/.pc-backup/git-url/dev/url-project.repo-info" ]] \
@@ -119,6 +137,17 @@ state="${TEST_BACKUP_ROOT}/.pc-backup/git-state/dev/project"
 [[ -f "${TEST_BACKUP_ROOT}/dev/full-container/full-project/ignored-local.txt" ]] \
   || fail "ignored file in full repository was not copied"
 git -C "${mirror}" fsck --full >/dev/null
+git -C "${TEST_BACKUP_ROOT}/dev/worktree-main/.git" fsck --full >/dev/null
+git -C "${TEST_BACKUP_ROOT}/dev/worktree-linked/.git" fsck --full >/dev/null
+
+# Simulate stale derived metadata left by an interrupted/background maintenance
+# run. The next backup must rebuild it from this mirror's reachable commits.
+git -C "${TEST_HOME}/dev/worktree-main" commit-graph write --reachable
+cp "${TEST_HOME}/dev/worktree-main/.git/objects/info/commit-graph" \
+  "${mirror}/objects/info/commit-graph"
+if git -C "${mirror}" commit-graph verify >/dev/null 2>&1; then
+  fail "foreign commit graph was unexpectedly valid"
+fi
 
 # Exercise an update of an existing mirror and preservation of pre-update refs.
 git -C "${TEST_HOME}/dev/project" add tracked.txt untracked.txt
@@ -156,6 +185,8 @@ git -C "${TEST_HOME}/dev/unborn-project" rev-parse --verify --quiet HEAD >/dev/n
   && fail "restored unborn Git repository unexpectedly has a commit"
 [[ "$(cat "${TEST_HOME}/.secret-data/token.txt")" == "secret data" ]] \
   || fail "encrypted secret was not restored"
+[[ ! -e "${TEST_HOME}/.secret-data/agent.sock" ]] \
+  || fail "Unix socket from secret data was unexpectedly restored"
 [[ "$(git -C "${TEST_HOME}/dev/project" branch --show-current)" == "main" ]] \
   || fail "Git branch was not restored"
 [[ "$(cat "${TEST_HOME}/dev/url-project/README.md")" == "remote-backed" ]] \
