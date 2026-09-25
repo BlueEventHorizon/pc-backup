@@ -85,6 +85,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
     ├── secrets-history/      # 日付付き暗号化アーカイブ
     ├── homebrew/             # Brewfile等
     ├── changes/, logs/, locks/
+    └── tool/                 # 復元用のツール一式と実行時の設定（backup.yamlとして保存）
 ```
 
 ### Gitバックアップのモード判定
@@ -112,7 +113,7 @@ skip（完全一致） > full（完全一致 or 親ディレクトリ配下） >
 
 ### 復元
 
-`restore.sh`は`--all`/`--files`/`--git`/`--secrets`/`--no-secrets`/`--brew`/`--dry-run`/`--yes`を受け付ける。既存の復元先があるGitリポジトリは上書きせずスキップする。
+`restore.sh`は`--all`/`--files`/`--git`/`--secrets`/`--no-secrets`/`--brew`/`--dry-run`/`--yes`を受け付ける。既存の復元先があるGitリポジトリは上書きせずスキップする。新しいMacでは`.pc-backup/tool/`をローカルへコピーし、同梱の`backup.yaml`で実行する（`backup.sh`の`pc_backup_tool_bundle`が毎回更新）。
 
 ### テスト
 

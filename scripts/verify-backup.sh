@@ -69,6 +69,14 @@ verify_secrets() {
   fi
 }
 
+verify_tool_bundle() {
+  local bundle="${PC_BACKUP_ROOT}/.pc-backup/tool" item missing=0
+  for item in Makefile backup.yaml scripts/restore.sh scripts/load-config.py; do
+    [[ -e "${bundle}/${item}" ]] || { pc_warn "tool bundle is missing: .pc-backup/tool/${item}"; missing=1; }
+  done
+  [[ ${missing} -eq 1 ]] || pc_log "Tool bundle: present"
+}
+
 main() {
   pc_validate_destination
   [[ -d "${PC_BACKUP_ROOT}/.pc-backup" ]] || pc_die "backup metadata not found: ${PC_BACKUP_ROOT}/.pc-backup"
@@ -76,6 +84,7 @@ main() {
   verify_manifest
   verify_git_mirrors
   verify_secrets
+  verify_tool_bundle
   if [[ ${VERIFY_FAILURES} -gt 0 ]]; then
     pc_log "Verification failed: ${VERIFY_FAILURES} item(s)"
     return 1

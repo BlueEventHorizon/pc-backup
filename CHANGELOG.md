@@ -7,9 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- 本番バックアップのたびに、このツール一式と実行時の設定を`.pc-backup/tool/`へ同梱し、バックアップ先だけから復元できるようにする
+- `git-full`から`git-mirror`へ切り替えた後に残った旧コピーを、確認のうえ新しいミラーへ置き換える（`PC_BACKUP_ASSUME_YES=1`で確認を省略）
+
 ### Changed
 
 - 通常ファイルと`git-full`のミラーで、元から削除されたファイルをバックアップ先からも削除する
+
+### Fixed
+
+- 既存のGitミラー保存先がbareか判定する処理が終了コードだけを見ていたため、非bareの`.git/`（旧`git-full`コピー等）を通過させていた問題を修正
 
 ## [0.1.0] - 2026-09-01
 

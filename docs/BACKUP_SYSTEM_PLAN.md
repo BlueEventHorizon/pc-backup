@@ -99,7 +99,8 @@ backup.sh
     │   └── brew-casks.txt
     ├── changes/                       # rsyncのitemize-changes
     ├── logs/
-    └── locks/backup.lock/
+    ├── locks/backup.lock/
+    └── tool/                          # 復元用のツール一式とbackup.yaml
 ```
 
 ## 6. YAML設定
@@ -245,6 +246,18 @@ git clone --mirror --no-hardlinks <source> <temporary-destination>
 
 成功後に一時ディレクトリを最終的な`.git/`へ移動する。2回目以降は、更新前refsを`refs/backup-snapshots/<timestamp>/`へ保存し、ローカルの元リポジトリから`refs/*`をfetchする。
 
+既存の`.git`がbareリポジトリでない場合（`git-full`から`git-mirror`へ切り替えた後に残った旧コピー等。linked worktreeのコピーでは`.git`がファイルになる）は、既存ミラーとしてfetchしない。判定は`git rev-parse --is-bare-repository`の出力が`true`であることで行う（非bareの`.git/`でも終了コードは0になるため）。
+
+元リポジトリは存在するため、ユーザーが確認すれば旧コピーを置き換える。
+
+1. 対話端末で旧コピーの削除とミラー再作成を確認する。`PC_BACKUP_ASSUME_YES=1`なら確認しない。非対話実行または拒否時は旧コピーを変更せず、そのリポジトリを失敗として扱う。
+2. `.pc-backup/.git-replace.*`へ新しいミラーを`clone --mirror`する。失敗時は旧コピーを変更しない。
+3. 旧コピーを同じ一時ディレクトリへ退避し、新しいミラーを`<repo>/.git`へ配置する。
+4. `files.mirror`で個別指定したリポジトリ内のファイルを退避先から戻す。
+5. 古い`.pc-backup/git-full/<repo>.repo-info`と退避先を削除する。
+
+途中で失敗した場合は退避先を残し、そのパスを警告する。旧コピーの中に別の検出済みリポジトリがある場合は、そのミラーを巻き込まないよう自動置き換えせず失敗として扱う。Dry Runでは置き換え対象をログに出すだけとする。
+
 ミラーには復元用の独自configを保存する。
 
 ```ini
@@ -326,6 +339,15 @@ LaunchAgentには対話端末がないため、定期実行ではKeychain登録�
 
 `brew bundle dump`が失敗した場合は、leavesとcasksから最小の`Brewfile`を生成する。復元時に`--brew`を指定すると`brew bundle`を実行する。
 
+### 10.1 ツール一式の同梱
+
+復元がこのプロジェクトのcheckoutや`backup.yaml`の別途保管に依存しないよう、本番バックアップのたびに次を`.pc-backup/tool/`へ保存する。
+
+- 復元に必要な`Makefile`、`README.md`、`requirements.txt`、`scripts/`（`__pycache__`と`.DS_Store`は除外）
+- 実行時に読み込んだ設定ファイル（`PC_BACKUP_CONFIG`指定時はそのファイル）を`backup.yaml`として、権限`600`で保存
+
+`.pc-backup/.tool.*`へ作成してから旧`tool/`と入れ替える。Dry Runでは書き込まない。バックアップ先の内部から実行された場合は、自身を入れ替えないよう更新しない。復元時は`tool/`をローカルへコピーし、同梱の`backup.yaml`で`restore.sh`を実行する。
+
 ## 11. マニフェストとログ
 
 ### 11.1 マニフェスト
@@ -374,6 +396,7 @@ Dry Runは保存先にログやマニフェストを書かない。
 - Gitミラー初回作成は一時ディレクトリから`mv`する。
 - 暗号化アーカイブのlatestは一時名から`mv`する。
 - マニフェストlatestも一時名から`mv`する。
+- 同梱ツール`tool/`も一時ディレクトリに作成してから入れ替える。
 - 一時作業ディレクトリは`.pc-backup/.work.*`を使い、`trap`で削除する。
 - rsync先全体のトランザクションやスナップショットは実装していない。
 
@@ -402,6 +425,7 @@ Dry Runは保存先にログやマニフェストを書かない。
 2. `manifest-latest.json`が存在し、JSONとして解析できること。
 3. `backup.mode=git-mirror`の全`.git/`が`git fsck --full`に成功すること。
 4. 暗号化アーカイブが復号でき、tar一覧を読めること。
+5. 同梱ツール`.pc-backup/tool/`に`Makefile`、`backup.yaml`、`scripts/restore.sh`、`scripts/load-config.py`があること。この機能より前に作成したバックアップを考慮し、欠落は失敗ではなく警告とする。
 
 通常ファイルのバイト単位ハッシュ照合は現在行わない。
 

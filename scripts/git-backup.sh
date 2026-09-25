@@ -145,6 +145,67 @@ pc_git_write_manifest_entry() {
   } >> "${PC_MANIFEST_REPOS_FILE}"
 }
 
+pc_git_confirm() {
+  local prompt="$1" answer
+  [[ "${PC_BACKUP_ASSUME_YES:-0}" != "1" ]] || return 0
+  [[ -t 0 || -t 1 || -t 2 ]] || return 1
+  printf '%s [y/N] ' "${prompt}" > /dev/tty
+  IFS= read -r answer < /dev/tty || return 1
+  case "${answer}" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
+}
+
+# Replace a non-bare copy (e.g. left after switching git-full to git-mirror)
+# at a mirror destination. The source repository still exists, so the copy is
+# removed only after the user confirms and a new mirror has been built.
+# Explicit files.mirror entries inside the repository are carried over.
+pc_git_replace_nonbare_mirror() {
+  local repo="$1" rel="$2" mirror="$3"
+  local copy_dir="${PC_BACKUP_ROOT}/${rel}" other entry entry_rel tmp_dir tmp_mirror held_dir
+  for other in "${PC_GIT_REPOSITORIES[@]}"; do
+    if [[ "${other}" == "${repo}/"* ]]; then
+      pc_warn "existing Git destination is not a bare repository and contains nested repository data; remove it manually: ${copy_dir}"
+      return 1
+    fi
+  done
+  if ! pc_git_confirm "Existing Git destination is not a bare repository (e.g. a leftover git-full copy): ${copy_dir}
+Delete it and recreate a Git mirror from ${repo}? Files only in this copy, such as gitignored files, are removed from the backup."; then
+    pc_warn "existing Git destination is not a bare repository (e.g. a leftover git-full copy); run make backup in a terminal to replace it, or remove it manually: ${copy_dir}"
+    return 1
+  fi
+
+  tmp_dir=$(mktemp -d "${PC_BACKUP_ROOT}/.pc-backup/.git-replace.XXXXXX")
+  tmp_mirror="${tmp_dir}/repository.git"
+  held_dir="${tmp_dir}/previous"
+  if ! git clone --mirror --no-hardlinks "${repo}" "${tmp_mirror}"; then
+    rm -rf -- "${tmp_dir}"
+    pc_warn "failed to create Git mirror: ${repo}"
+    return 1
+  fi
+  if ! mv -- "${copy_dir}" "${held_dir}"; then
+    rm -rf -- "${tmp_dir}"
+    pc_warn "failed to move aside non-bare Git destination: ${copy_dir}"
+    return 1
+  fi
+  if ! mkdir -p -- "${copy_dir}" || ! mv -- "${tmp_mirror}" "${mirror}"; then
+    pc_warn "failed to place new Git mirror; previous copy kept at: ${held_dir}"
+    return 1
+  fi
+  for entry in "${PC_BACKUP_MIRROR_PATHS[@]}"; do
+    entry=$(pc_absolute_path "${entry}" 2>/dev/null || printf '%s' "${entry%/}")
+    [[ "${entry}" == "${repo}/"* ]] || continue
+    entry_rel="${entry#${repo}/}"
+    [[ -e "${held_dir}/${entry_rel}" ]] || continue
+    if ! mkdir -p -- "$(dirname -- "${copy_dir}/${entry_rel}")" \
+      || ! mv -- "${held_dir}/${entry_rel}" "${copy_dir}/${entry_rel}"; then
+      pc_warn "failed to carry over explicit file; previous copy kept at: ${held_dir}"
+      return 1
+    fi
+  done
+  rm -f -- "${PC_BACKUP_ROOT}/.pc-backup/git-full/${rel}.repo-info"
+  rm -rf -- "${tmp_dir}"
+  pc_log "Replaced non-bare Git destination with a new mirror: ${rel}"
+}
+
 pc_backup_one_git_repo() {
   local repo="$1" mode rel mirror state_dir origin head branch storage_rel verification="not-run"
   local tmp_dir tmp_mirror head_ref head_value info_file unsafe=0 is_bare capture_state=0 reject_dirty=0
@@ -267,7 +328,21 @@ pc_backup_one_git_repo() {
       pc_log "Git mirror: ${repo} -> ${storage_rel}"
       if [[ "${PC_BACKUP_DRY_RUN:-0}" != "1" ]]; then
         mkdir -p "$(dirname -- "${mirror}")"
-        if [[ ! -d "${mirror}" ]]; then
+        local mirror_is_bare="true"
+        if [[ -d "${mirror}" ]]; then
+          # rev-parse succeeds for non-bare .git directories too, so compare
+          # its output. A leftover git-full copy must not receive mirror refs.
+          mirror_is_bare=$(git -C "${mirror}" rev-parse --is-bare-repository 2>/dev/null || true)
+        elif [[ -e "${mirror}" || -L "${mirror}" ]]; then
+          # A linked worktree copied by git-full has a .git file.
+          mirror_is_bare="false"
+        fi
+        if [[ "${mirror_is_bare}" != "true" ]]; then
+          if ! pc_git_replace_nonbare_mirror "${repo}" "${rel}" "${mirror}"; then
+            PC_BACKUP_FAILURES=$((PC_BACKUP_FAILURES + 1))
+            return 0
+          fi
+        elif [[ ! -d "${mirror}" ]]; then
           tmp_dir=$(mktemp -d "$(dirname -- "${mirror}")/.git-mirror.XXXXXX")
           tmp_mirror="${tmp_dir}/repository.git"
           if git clone --mirror --no-hardlinks "${repo}" "${tmp_mirror}"; then
@@ -280,11 +355,6 @@ pc_backup_one_git_repo() {
             return 0
           fi
         else
-          if ! git -C "${mirror}" rev-parse --is-bare-repository >/dev/null 2>&1; then
-            pc_warn "existing Git destination is not a bare repository: ${mirror}"
-            PC_BACKUP_FAILURES=$((PC_BACKUP_FAILURES + 1))
-            return 0
-          fi
           pc_git_snapshot_refs "${mirror}" "${PC_BACKUP_TIMESTAMP}"
           # A fetch may start detached auto-maintenance. When many linked
           # worktrees share one object store, its repack/MIDX update can still
@@ -316,6 +386,10 @@ pc_backup_one_git_repo() {
           fi
         fi
       else
+        if [[ -e "${mirror}" || -L "${mirror}" ]] \
+          && [[ "$(git -C "${mirror}" rev-parse --is-bare-repository 2>/dev/null || true)" != "true" ]]; then
+          pc_log "DRY-RUN: would ask to replace non-bare Git destination: ${PC_BACKUP_ROOT}/${rel}"
+        fi
         verification="dry-run"
       fi
       pc_git_write_manifest_entry "${repo}" "${storage_rel}" "git-mirror" "${origin}" "${head}" "${branch}" "${verification}"

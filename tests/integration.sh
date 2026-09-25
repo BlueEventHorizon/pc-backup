@@ -139,6 +139,14 @@ state="${TEST_BACKUP_ROOT}/.pc-backup/git-state/dev/project"
   || fail "full repository below configured parent was not copied"
 [[ -f "${TEST_BACKUP_ROOT}/dev/full-container/full-project/ignored-local.txt" ]] \
   || fail "ignored file in full repository was not copied"
+tool_bundle="${TEST_BACKUP_ROOT}/.pc-backup/tool"
+for bundled in Makefile requirements.txt scripts/restore.sh scripts/lib/config.sh scripts/load-config.py; do
+  [[ -f "${tool_bundle}/${bundled}" ]] || fail "tool bundle is missing ${bundled}"
+done
+cmp -s "${PC_BACKUP_CONFIG}" "${tool_bundle}/backup.yaml" \
+  || fail "active configuration was not bundled as backup.yaml"
+[[ ! -e "${tool_bundle}/.venv" && ! -e "${tool_bundle}/.git" && ! -e "${tool_bundle}/tests" ]] \
+  || fail "tool bundle contains local-only project files"
 git -C "${mirror}" fsck --full >/dev/null
 git -C "${TEST_BACKUP_ROOT}/dev/worktree-main/.git" fsck --full >/dev/null
 git -C "${TEST_BACKUP_ROOT}/dev/worktree-linked/.git" fsck --full >/dev/null
@@ -168,9 +176,13 @@ snapshot_count=$(git -C "${mirror}" for-each-ref --count=1 refs/backup-snapshots
 [[ ! -e "${TEST_BACKUP_ROOT}/dev/full-container/full-project/deleted-after-first.txt" ]] \
   || fail "deleted git-full file remained in backup"
 
+# Restore as on a new Mac: copy the tool bundle out of the backup and run it
+# with its bundled backup.yaml instead of this checkout's scripts/config.
 mv "${TEST_HOME}" "${TEST_ROOT}/source-home"
 mkdir -p "${TEST_HOME}"
-HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/restore.sh" --yes --all
+cp -R "${tool_bundle}" "${TEST_ROOT}/restored-tool"
+env -u PC_BACKUP_CONFIG PC_BACKUP_PYTHON="${TEST_PYTHON}" HOME="${TEST_HOME}" \
+  "${TEST_ROOT}/restored-tool/scripts/restore.sh" --yes --all
 
 [[ "$(cat "${TEST_HOME}/Documents/example.txt")" == "document data" ]] \
   || fail "regular file restore differs"
@@ -200,5 +212,43 @@ git -C "${TEST_HOME}/dev/unborn-project" rev-parse --verify --quiet HEAD >/dev/n
   || fail "Git branch was not restored"
 [[ "$(cat "${TEST_HOME}/dev/url-project/README.md")" == "remote-backed" ]] \
   || fail "URL-only repository was not restored"
+
+# Copies left at mirror destinations after switching from git-full to
+# git-mirror must not receive mirror refs. Without confirmation the backup
+# fails and leaves them untouched; with confirmation they are replaced by new
+# mirrors while explicit files.mirror entries inside the repository are kept.
+project_copy="${TEST_BACKUP_ROOT}/dev/project"
+linked_copy="${TEST_BACKUP_ROOT}/dev/worktree-linked"
+stale_full_info="${TEST_BACKUP_ROOT}/.pc-backup/git-full/dev/project.repo-info"
+rm -rf "${project_copy}" "${linked_copy}"
+cp -R "${TEST_HOME}/dev/project" "${project_copy}"
+mkdir -p "${linked_copy}" "$(dirname -- "${stale_full_info}")"
+printf 'gitdir: /nonexistent/worktrees/linked\n' > "${linked_copy}/.git"
+printf 'stale\n' > "${stale_full_info}"
+nonbare_refs_before=$(git -C "${mirror}" for-each-ref | cksum)
+nonbare_output="${TEST_ROOT}/nonbare-backup.log"
+if HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" \
+  </dev/null >"${nonbare_output}" 2>&1; then
+  fail "backup succeeded over a non-bare Git destination"
+fi
+[[ "$(grep -c 'existing Git destination is not a bare repository' "${nonbare_output}")" -eq 2 ]] \
+  || fail "non-bare Git destinations were not reported"
+[[ "$(git -C "${mirror}" for-each-ref | cksum)" == "${nonbare_refs_before}" ]] \
+  || fail "non-bare Git destination refs were modified"
+[[ -f "${linked_copy}/.git" ]] || fail "unconfirmed .git file destination was modified"
+
+PC_BACKUP_ASSUME_YES=1 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" </dev/null
+HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/verify-backup.sh"
+[[ "$(git -C "${mirror}" rev-parse --is-bare-repository)" == "true" ]] \
+  || fail "non-bare Git destination was not replaced by a mirror"
+[[ "$(git -C "${linked_copy}/.git" rev-parse --is-bare-repository)" == "true" ]] \
+  || fail ".git file destination was not replaced by a mirror"
+[[ ! -e "${project_copy}/tracked.txt" ]] \
+  || fail "working tree of the replaced copy remained"
+[[ "$(cat "${project_copy}/local-config.yaml")" == "local config" ]] \
+  || fail "explicit file inside the replaced copy was not kept"
+[[ ! -e "${stale_full_info}" ]] || fail "stale git-full metadata remained"
+compgen -G "${TEST_BACKUP_ROOT}/.pc-backup/.git-replace.*" >/dev/null \
+  && fail "temporary replacement directory remained"
 
 printf 'Integration test passed.\n'

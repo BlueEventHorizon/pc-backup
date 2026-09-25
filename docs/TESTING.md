@@ -156,6 +156,7 @@ home/.secret-data/token.txt
 - `full-container/full-project/.git/`と`ignored-local.txt`がある。
 - `.secret-data/encrypted-backup.tar.gpg`がある。
 - Gitミラーが`git fsck --full`に成功する。
+- `.pc-backup/tool/`に`Makefile`、`requirements.txt`、`scripts/`一式があり、`backup.yaml`がテスト用YAMLと同一で、`.venv`、`.git`、`tests`を含まない。
 
 ### 6.4 更新バックアップ
 
@@ -170,7 +171,7 @@ home/.secret-data/token.txt
 
 1. 元の`home/`を`source-home/`へ移動する。
 2. 新しい空の`home/`を作る。
-3. `restore.sh --yes --all`を実行する。
+3. 新しいMacを模擬し、`.pc-backup/tool/`を一時ディレクトリへコピーして、`PC_BACKUP_CONFIG`を外した状態でコピー側の`restore.sh --yes --all`を実行する（同梱の`backup.yaml`が使われる）。
 4. 通常文書の内容を比較する。
 5. Gitのbranch、tracked内容、unstaged差分、未追跡ファイルを検査する。
 6. Git内の個別コピーファイルを検査する。
@@ -178,11 +179,24 @@ home/.secret-data/token.txt
 8. `full`対象のgitignoreファイルを検査する。
 9. 復号した`token.txt`の内容を比較する。
 
+### 6.6 非bare保存先の拒否と置き換え
+
+`git-full`から`git-mirror`へ切り替えた後の旧コピーを模擬する。
+
+1. `dev/project/`を復元済みリポジトリ（作業ツリーと非bare`.git/`）のコピーで置き換え、古い`.pc-backup/git-full/dev/project.repo-info`を置く。
+2. `dev/worktree-linked/`を、`.git`ファイルだけを持つディレクトリで置き換える（linked worktreeのコピーを模擬）。
+3. 標準入力を`/dev/null`にした非対話で`backup.sh`を実行し、終了コードが0以外であることを確認する。
+4. 出力に`existing Git destination is not a bare repository`が2件含まれ、`dev/project/.git/`のrefsと`.git`ファイルが変更されていないことを確認する。
+5. `PC_BACKUP_ASSUME_YES=1`で`backup.sh`を実行し、`verify-backup.sh`が成功することを確認する。
+6. 両方の保存先がbareミラーになり、旧作業ツリーの`tracked.txt`が消え、個別指定した`local-config.yaml`が残り、古いrepo-infoと`.pc-backup/.git-replace.*`が残っていないことを確認する。
+
+対話端末での`y`/`N`入力は自動テストの対象外である。
+
 ## 7. 成功条件
 
 次をすべて満たした場合だけ成功とする。
 
-- 全スクリプが終了コード0で完了する。
+- 意図的に失敗させる6.6の`backup.sh`を除き、全スクリプトが終了コード0で完了する。
 - 必要な生成物が存在する。
 - 保存してはいけないGit作業ツリーが通常コピーされていない。
 - Git `fsck`が成功する。

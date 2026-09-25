@@ -166,7 +166,7 @@ caffeinate -i ./scripts/backup.sh
 ./scripts/verify-backup.sh
 ```
 
-`Verification complete (0 warning(s))`と表示されれば、実装されている全検査が成功している。Gitミラーには`git fsck --full`、JSONマニフェストには構文検査、GPG暗号化アーカイブには復号とtar一覧取得を行う。元データとの完全比較、マニフェスト内容のスキーマ検証、`git-full`や通常ファイルの内容比較は行わない。
+`Verification complete (0 warning(s))`と表示されれば、実装されている全検査が成功している。Gitミラーには`git fsck --full`、JSONマニフェストには構文検査、GPG暗号化アーカイブには復号とtar一覧取得を行い、復元用の同梱ツール`.pc-backup/tool/`の有無を確認する。元データとの完全比較、マニフェスト内容のスキーマ検証、`git-full`や通常ファイルの内容比較は行わない。
 
 パスフレーズが取得できない場合、Secrets検証は警告してスキップされるが、ほかに失敗がなければスクリプトの終了コードは0になる。したがって、終了コードだけでなく`0 warning(s)`も確認する。マニフェストはJSON構文だけを検査するため、単独で`verify-backup.sh`を実行しても、過去の`partial_failure`を内容から失敗判定することはない。
 
@@ -307,6 +307,13 @@ git:
 
 `full`に親ディレクトリを指定すると、その配下で検出したすべてのGitリポジトリに`git-full`を適用する。個別リポジトリを`skip`に入れた場合は、親の`full`より`skip`を優先する。
 
+`full`から外したリポジトリの旧コピーは、`backup.rsync_delete`では削除されない（同期対象内の削除だけを反映するため）。`git-mirror`へ切り替えた場合、次回の`make backup`が旧コピー（`<destination>/<repo>/`）を検出し、削除してミラーを作り直すか確認する。`y`で新しいミラーを作成した後に旧コピーを削除し、`files.mirror`で個別指定したリポジトリ内のファイルは残す。旧コピーだけにあるgitignore対象ファイル等はバックアップから消える（元リポジトリには残る）。
+
+- 確認できない非対話実行（LaunchAgent等）や`N`の場合は旧コピーを変更せず、そのリポジトリを失敗として報告する。端末から`make backup`を実行するか、旧コピーを手動で削除する
+- 旧コピーの中に別のGitリポジトリがある場合は自動で置き換えず、手動削除を案内する
+- `PC_BACKUP_ASSUME_YES=1`を指定すると確認せずに置き換える
+- `skip`にした場合や元リポジトリを削除した場合の旧コピーは対象外で、手動で削除する
+
 `dirty_mode`の動作は次のとおり。
 
 | 値 | 動作 |
@@ -405,7 +412,8 @@ PC_BACKUP_DRY_RUN=1 ./scripts/backup.sh
     ├── homebrew/Brewfile
     ├── changes/
     ├── logs/
-    └── locks/
+    ├── locks/
+    └── tool/               # 復元用のこのツール一式とbackup.yaml
 ```
 
 HOME配下の保存先はYAMLのパスと同じ階層になる。Git、暗号化などの保存方式は階層を変えず、その位置にあるデータの表現方法として扱う。
@@ -416,9 +424,27 @@ HOME配下の保存先はYAMLのパスと同じ階層になる。Git、暗号化
 - OneDriveなどFile Provider配下への書き込み完了は確認するが、クラウド側への同期完了、空き容量、オンラインのみファイルの利用可能性は検証しない
 - 通常ファイルのバイト単位ハッシュやクラウド側のバージョン履歴は検証しない
 - Git snapshot refsは自動削除されないため、長期運用では保存容量を確認する
-- バックアップ設定とスクリプト自体も復元できるよう、必要なら`backup.yaml`とこのプロジェクトをバックアップ対象へ明示する
 
 ## 復元
+
+### 新しいMacで復元する
+
+本番バックアップのたびに、復元に必要なファイル（`Makefile`、`README.md`、`requirements.txt`、`scripts/`）と、実行時の設定ファイルを`backup.yaml`として`<destination>/.pc-backup/tool/`へ保存する。このプロジェクトのcheckoutや`backup.yaml`が手元になくても、バックアップ先だけから復元できる。復元に使わない`docs/`や`tests/`等は含まない。
+
+```bash
+# バックアップ先（例: OneDriveの同期完了後）からローカルへコピーして実行する
+cp -R ~/Library/CloudStorage/OneDrive-Accenture/backup/.pc-backup/tool ~/pc-backup
+cd ~/pc-backup
+make restore-dry-run  # Python/PyYAMLが未準備なら確認のうえ準備する
+make restore
+```
+
+- バックアップ先の中で直接実行せず、ローカルへコピーしてから実行する（`.venv`がバックアップ先に作られるのを避けるため）
+- バックアップ先のマウント位置が元のMacと違う場合は、コピーした`backup.yaml`の`destination.root`を修正する。`destination.id`の検証により、別の保存先を誤って使うことはない
+- 暗号化された機密情報の復元にはパスフレーズが必要。新しいMacのKeychainには無いため、実行時に入力する
+- Finderで`.pc-backup`が見えない場合は`Cmd+Shift+.`で隠しファイルを表示する
+
+### 復元コマンド
 
 引数なしの`restore.sh`と`--all`は、通常ファイル、Git、Secretsを対象にする。Homebrewパッケージは自動では復元せず、`--brew`を明示した場合だけ`brew bundle`を実行する。Dry Runでは書き込みも確認プロンプトも行わない。
 
@@ -486,6 +512,7 @@ LaunchAgentログ:
 - 通常ファイルのバックアップ・復元
 - 通常ファイルと`git-full`から削除したファイルのミラー削除
 - Gitミラーの初回作成と更新
+- 非bareの既存`.git/`（旧`git-full`コピー等）へのミラー書き込み拒否と、確認後のミラーへの置き換え
 - linked worktreeごとの独立ミラー作成と検証
 - 不整合commit-graphの自動再構築
 - 更新前Git参照の保持
