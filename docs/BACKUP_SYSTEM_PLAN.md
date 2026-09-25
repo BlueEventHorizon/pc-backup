@@ -245,7 +245,17 @@ git clone --mirror --no-hardlinks <source> <temporary-destination>
 
 成功後に一時ディレクトリを最終的な`.git/`へ移動する。2回目以降は、更新前refsを`refs/backup-snapshots/<timestamp>/`へ保存し、ローカルの元リポジトリから`refs/*`をfetchする。
 
-既存の`.git/`がbareリポジトリでない場合（`git-full`から`git-mirror`へ切り替えた後に残った旧コピー等）は、fetchせずにそのリポジトリを失敗として扱う。判定は`git rev-parse --is-bare-repository`の出力が`true`であることで行う（非bareの`.git/`でも終了コードは0になるため）。旧コピーを手動で削除すると、次回に新しいミラーが作成される。
+既存の`.git`がbareリポジトリでない場合（`git-full`から`git-mirror`へ切り替えた後に残った旧コピー等。linked worktreeのコピーでは`.git`がファイルになる）は、既存ミラーとしてfetchしない。判定は`git rev-parse --is-bare-repository`の出力が`true`であることで行う（非bareの`.git/`でも終了コードは0になるため）。
+
+元リポジトリは存在するため、ユーザーが確認すれば旧コピーを置き換える。
+
+1. 対話端末で旧コピーの削除とミラー再作成を確認する。`PC_BACKUP_ASSUME_YES=1`なら確認しない。非対話実行または拒否時は旧コピーを変更せず、そのリポジトリを失敗として扱う。
+2. `.pc-backup/.git-replace.*`へ新しいミラーを`clone --mirror`する。失敗時は旧コピーを変更しない。
+3. 旧コピーを同じ一時ディレクトリへ退避し、新しいミラーを`<repo>/.git`へ配置する。
+4. `files.mirror`で個別指定したリポジトリ内のファイルを退避先から戻す。
+5. 古い`.pc-backup/git-full/<repo>.repo-info`と退避先を削除する。
+
+途中で失敗した場合は退避先を残し、そのパスを警告する。旧コピーの中に別の検出済みリポジトリがある場合は、そのミラーを巻き込まないよう自動置き換えせず失敗として扱う。Dry Runでは置き換え対象をログに出すだけとする。
 
 ミラーには復元用の独自configを保存する。
 

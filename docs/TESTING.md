@@ -178,12 +178,18 @@ home/.secret-data/token.txt
 8. `full`対象のgitignoreファイルを検査する。
 9. 復号した`token.txt`の内容を比較する。
 
-### 6.6 非bare保存先の拒否
+### 6.6 非bare保存先の拒否と置き換え
 
-1. `dev/project/.git/`のミラーを削除し、復元済みリポジトリの非bare`.git/`をコピーして置き換える（`git-full`から`git-mirror`へ切り替えた後の旧コピーを模擬）。
-2. `backup.sh`を実行し、終了コードが0以外であることを確認する。
-3. 出力に`existing Git destination is not a bare repository`が含まれることを確認する。
-4. 置き換えた`.git/`のrefsが変更されていないことを確認する。
+`git-full`から`git-mirror`へ切り替えた後の旧コピーを模擬する。
+
+1. `dev/project/`を復元済みリポジトリ（作業ツリーと非bare`.git/`）のコピーで置き換え、古い`.pc-backup/git-full/dev/project.repo-info`を置く。
+2. `dev/worktree-linked/`を、`.git`ファイルだけを持つディレクトリで置き換える（linked worktreeのコピーを模擬）。
+3. 標準入力を`/dev/null`にした非対話で`backup.sh`を実行し、終了コードが0以外であることを確認する。
+4. 出力に`existing Git destination is not a bare repository`が2件含まれ、`dev/project/.git/`のrefsと`.git`ファイルが変更されていないことを確認する。
+5. `PC_BACKUP_ASSUME_YES=1`で`backup.sh`を実行し、`verify-backup.sh`が成功することを確認する。
+6. 両方の保存先がbareミラーになり、旧作業ツリーの`tracked.txt`が消え、個別指定した`local-config.yaml`が残り、古いrepo-infoと`.pc-backup/.git-replace.*`が残っていないことを確認する。
+
+対話端末での`y`/`N`入力は自動テストの対象外である。
 
 ## 7. 成功条件
 

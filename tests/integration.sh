@@ -201,18 +201,42 @@ git -C "${TEST_HOME}/dev/unborn-project" rev-parse --verify --quiet HEAD >/dev/n
 [[ "$(cat "${TEST_HOME}/dev/url-project/README.md")" == "remote-backed" ]] \
   || fail "URL-only repository was not restored"
 
-# A non-bare .git left at a mirror destination (e.g. after a repository moves
-# from git-full to git-mirror) must be rejected instead of receiving mirror refs.
-rm -rf "${mirror}"
-cp -R "${TEST_HOME}/dev/project/.git" "${mirror}"
+# Copies left at mirror destinations after switching from git-full to
+# git-mirror must not receive mirror refs. Without confirmation the backup
+# fails and leaves them untouched; with confirmation they are replaced by new
+# mirrors while explicit files.mirror entries inside the repository are kept.
+project_copy="${TEST_BACKUP_ROOT}/dev/project"
+linked_copy="${TEST_BACKUP_ROOT}/dev/worktree-linked"
+stale_full_info="${TEST_BACKUP_ROOT}/.pc-backup/git-full/dev/project.repo-info"
+rm -rf "${project_copy}" "${linked_copy}"
+cp -R "${TEST_HOME}/dev/project" "${project_copy}"
+mkdir -p "${linked_copy}" "$(dirname -- "${stale_full_info}")"
+printf 'gitdir: /nonexistent/worktrees/linked\n' > "${linked_copy}/.git"
+printf 'stale\n' > "${stale_full_info}"
 nonbare_refs_before=$(git -C "${mirror}" for-each-ref | cksum)
 nonbare_output="${TEST_ROOT}/nonbare-backup.log"
-if HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" >"${nonbare_output}" 2>&1; then
+if HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" \
+  </dev/null >"${nonbare_output}" 2>&1; then
   fail "backup succeeded over a non-bare Git destination"
 fi
-grep -q 'existing Git destination is not a bare repository' "${nonbare_output}" \
-  || fail "non-bare Git destination was not reported"
+[[ "$(grep -c 'existing Git destination is not a bare repository' "${nonbare_output}")" -eq 2 ]] \
+  || fail "non-bare Git destinations were not reported"
 [[ "$(git -C "${mirror}" for-each-ref | cksum)" == "${nonbare_refs_before}" ]] \
   || fail "non-bare Git destination refs were modified"
+[[ -f "${linked_copy}/.git" ]] || fail "unconfirmed .git file destination was modified"
+
+PC_BACKUP_ASSUME_YES=1 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" </dev/null
+HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/verify-backup.sh"
+[[ "$(git -C "${mirror}" rev-parse --is-bare-repository)" == "true" ]] \
+  || fail "non-bare Git destination was not replaced by a mirror"
+[[ "$(git -C "${linked_copy}/.git" rev-parse --is-bare-repository)" == "true" ]] \
+  || fail ".git file destination was not replaced by a mirror"
+[[ ! -e "${project_copy}/tracked.txt" ]] \
+  || fail "working tree of the replaced copy remained"
+[[ "$(cat "${project_copy}/local-config.yaml")" == "local config" ]] \
+  || fail "explicit file inside the replaced copy was not kept"
+[[ ! -e "${stale_full_info}" ]] || fail "stale git-full metadata remained"
+compgen -G "${TEST_BACKUP_ROOT}/.pc-backup/.git-replace.*" >/dev/null \
+  && fail "temporary replacement directory remained"
 
 printf 'Integration test passed.\n'

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `git-full`から`git-mirror`へ切り替えた後に残った旧コピーを、確認のうえ新しいミラーへ置き換える（`PC_BACKUP_ASSUME_YES=1`で確認を省略）
+
 ### Changed
 
 - 通常ファイルと`git-full`のミラーで、元から削除されたファイルをバックアップ先からも削除する
