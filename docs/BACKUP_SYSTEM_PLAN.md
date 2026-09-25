@@ -99,7 +99,8 @@ backup.sh
     │   └── brew-casks.txt
     ├── changes/                       # rsyncのitemize-changes
     ├── logs/
-    └── locks/backup.lock/
+    ├── locks/backup.lock/
+    └── tool/                          # 復元用のツール一式とbackup.yaml
 ```
 
 ## 6. YAML設定
@@ -338,6 +339,15 @@ LaunchAgentには対話端末がないため、定期実行ではKeychain登録�
 
 `brew bundle dump`が失敗した場合は、leavesとcasksから最小の`Brewfile`を生成する。復元時に`--brew`を指定すると`brew bundle`を実行する。
 
+### 10.1 ツール一式の同梱
+
+復元がこのプロジェクトのcheckoutや`backup.yaml`の別途保管に依存しないよう、本番バックアップのたびに次を`.pc-backup/tool/`へ保存する。
+
+- 復元に必要な`Makefile`、`README.md`、`requirements.txt`、`scripts/`（`__pycache__`と`.DS_Store`は除外）
+- 実行時に読み込んだ設定ファイル（`PC_BACKUP_CONFIG`指定時はそのファイル）を`backup.yaml`として、権限`600`で保存
+
+`.pc-backup/.tool.*`へ作成してから旧`tool/`と入れ替える。Dry Runでは書き込まない。バックアップ先の内部から実行された場合は、自身を入れ替えないよう更新しない。復元時は`tool/`をローカルへコピーし、同梱の`backup.yaml`で`restore.sh`を実行する。
+
 ## 11. マニフェストとログ
 
 ### 11.1 マニフェスト
@@ -386,6 +396,7 @@ Dry Runは保存先にログやマニフェストを書かない。
 - Gitミラー初回作成は一時ディレクトリから`mv`する。
 - 暗号化アーカイブのlatestは一時名から`mv`する。
 - マニフェストlatestも一時名から`mv`する。
+- 同梱ツール`tool/`も一時ディレクトリに作成してから入れ替える。
 - 一時作業ディレクトリは`.pc-backup/.work.*`を使い、`trap`で削除する。
 - rsync先全体のトランザクションやスナップショットは実装していない。
 
@@ -414,6 +425,7 @@ Dry Runは保存先にログやマニフェストを書かない。
 2. `manifest-latest.json`が存在し、JSONとして解析できること。
 3. `backup.mode=git-mirror`の全`.git/`が`git fsck --full`に成功すること。
 4. 暗号化アーカイブが復号でき、tar一覧を読めること。
+5. 同梱ツール`.pc-backup/tool/`に`Makefile`、`backup.yaml`、`scripts/restore.sh`、`scripts/load-config.py`があること。この機能より前に作成したバックアップを考慮し、欠落は失敗ではなく警告とする。
 
 通常ファイルのバイト単位ハッシュ照合は現在行わない。
 

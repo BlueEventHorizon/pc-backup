@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- 本番バックアップのたびに、このツール一式と実行時の設定を`.pc-backup/tool/`へ同梱し、バックアップ先だけから復元できるようにする
 - `git-full`から`git-mirror`へ切り替えた後に残った旧コピーを、確認のうえ新しいミラーへ置き換える（`PC_BACKUP_ASSUME_YES=1`で確認を省略）
 
 ### Changed

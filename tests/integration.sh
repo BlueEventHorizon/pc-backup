@@ -139,6 +139,14 @@ state="${TEST_BACKUP_ROOT}/.pc-backup/git-state/dev/project"
   || fail "full repository below configured parent was not copied"
 [[ -f "${TEST_BACKUP_ROOT}/dev/full-container/full-project/ignored-local.txt" ]] \
   || fail "ignored file in full repository was not copied"
+tool_bundle="${TEST_BACKUP_ROOT}/.pc-backup/tool"
+for bundled in Makefile requirements.txt scripts/restore.sh scripts/lib/config.sh scripts/load-config.py; do
+  [[ -f "${tool_bundle}/${bundled}" ]] || fail "tool bundle is missing ${bundled}"
+done
+cmp -s "${PC_BACKUP_CONFIG}" "${tool_bundle}/backup.yaml" \
+  || fail "active configuration was not bundled as backup.yaml"
+[[ ! -e "${tool_bundle}/.venv" && ! -e "${tool_bundle}/.git" && ! -e "${tool_bundle}/tests" ]] \
+  || fail "tool bundle contains local-only project files"
 git -C "${mirror}" fsck --full >/dev/null
 git -C "${TEST_BACKUP_ROOT}/dev/worktree-main/.git" fsck --full >/dev/null
 git -C "${TEST_BACKUP_ROOT}/dev/worktree-linked/.git" fsck --full >/dev/null
@@ -168,9 +176,13 @@ snapshot_count=$(git -C "${mirror}" for-each-ref --count=1 refs/backup-snapshots
 [[ ! -e "${TEST_BACKUP_ROOT}/dev/full-container/full-project/deleted-after-first.txt" ]] \
   || fail "deleted git-full file remained in backup"
 
+# Restore as on a new Mac: copy the tool bundle out of the backup and run it
+# with its bundled backup.yaml instead of this checkout's scripts/config.
 mv "${TEST_HOME}" "${TEST_ROOT}/source-home"
 mkdir -p "${TEST_HOME}"
-HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/restore.sh" --yes --all
+cp -R "${tool_bundle}" "${TEST_ROOT}/restored-tool"
+env -u PC_BACKUP_CONFIG PC_BACKUP_PYTHON="${TEST_PYTHON}" HOME="${TEST_HOME}" \
+  "${TEST_ROOT}/restored-tool/scripts/restore.sh" --yes --all
 
 [[ "$(cat "${TEST_HOME}/Documents/example.txt")" == "document data" ]] \
   || fail "regular file restore differs"

@@ -156,6 +156,7 @@ home/.secret-data/token.txt
 - `full-container/full-project/.git/`と`ignored-local.txt`がある。
 - `.secret-data/encrypted-backup.tar.gpg`がある。
 - Gitミラーが`git fsck --full`に成功する。
+- `.pc-backup/tool/`に`Makefile`、`requirements.txt`、`scripts/`一式があり、`backup.yaml`がテスト用YAMLと同一で、`.venv`、`.git`、`tests`を含まない。
 
 ### 6.4 更新バックアップ
 
@@ -170,7 +171,7 @@ home/.secret-data/token.txt
 
 1. 元の`home/`を`source-home/`へ移動する。
 2. 新しい空の`home/`を作る。
-3. `restore.sh --yes --all`を実行する。
+3. 新しいMacを模擬し、`.pc-backup/tool/`を一時ディレクトリへコピーして、`PC_BACKUP_CONFIG`を外した状態でコピー側の`restore.sh --yes --all`を実行する（同梱の`backup.yaml`が使われる）。
 4. 通常文書の内容を比較する。
 5. Gitのbranch、tracked内容、unstaged差分、未追跡ファイルを検査する。
 6. Git内の個別コピーファイルを検査する。
