@@ -178,11 +178,18 @@ home/.secret-data/token.txt
 8. `full`対象のgitignoreファイルを検査する。
 9. 復号した`token.txt`の内容を比較する。
 
+### 6.6 非bare保存先の拒否
+
+1. `dev/project/.git/`のミラーを削除し、復元済みリポジトリの非bare`.git/`をコピーして置き換える（`git-full`から`git-mirror`へ切り替えた後の旧コピーを模擬）。
+2. `backup.sh`を実行し、終了コードが0以外であることを確認する。
+3. 出力に`existing Git destination is not a bare repository`が含まれることを確認する。
+4. 置き換えた`.git/`のrefsが変更されていないことを確認する。
+
 ## 7. 成功条件
 
 次をすべて満たした場合だけ成功とする。
 
-- 全スクリプが終了コード0で完了する。
+- 意図的に失敗させる6.6の`backup.sh`を除き、全スクリプトが終了コード0で完了する。
 - 必要な生成物が存在する。
 - 保存してはいけないGit作業ツリーが通常コピーされていない。
 - Git `fsck`が成功する。

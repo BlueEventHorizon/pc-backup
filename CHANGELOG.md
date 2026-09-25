@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - 通常ファイルと`git-full`のミラーで、元から削除されたファイルをバックアップ先からも削除する
 
+### Fixed
+
+- 既存のGitミラー保存先がbareか判定する処理が終了コードだけを見ていたため、非bareの`.git/`（旧`git-full`コピー等）を通過させていた問題を修正
+
 ## [0.1.0] - 2026-09-01
 
 ### Added

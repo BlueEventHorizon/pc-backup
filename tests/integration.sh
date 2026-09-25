@@ -201,4 +201,18 @@ git -C "${TEST_HOME}/dev/unborn-project" rev-parse --verify --quiet HEAD >/dev/n
 [[ "$(cat "${TEST_HOME}/dev/url-project/README.md")" == "remote-backed" ]] \
   || fail "URL-only repository was not restored"
 
+# A non-bare .git left at a mirror destination (e.g. after a repository moves
+# from git-full to git-mirror) must be rejected instead of receiving mirror refs.
+rm -rf "${mirror}"
+cp -R "${TEST_HOME}/dev/project/.git" "${mirror}"
+nonbare_refs_before=$(git -C "${mirror}" for-each-ref | cksum)
+nonbare_output="${TEST_ROOT}/nonbare-backup.log"
+if HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" >"${nonbare_output}" 2>&1; then
+  fail "backup succeeded over a non-bare Git destination"
+fi
+grep -q 'existing Git destination is not a bare repository' "${nonbare_output}" \
+  || fail "non-bare Git destination was not reported"
+[[ "$(git -C "${mirror}" for-each-ref | cksum)" == "${nonbare_refs_before}" ]] \
+  || fail "non-bare Git destination refs were modified"
+
 printf 'Integration test passed.\n'

@@ -280,8 +280,12 @@ pc_backup_one_git_repo() {
             return 0
           fi
         else
-          if ! git -C "${mirror}" rev-parse --is-bare-repository >/dev/null 2>&1; then
-            pc_warn "existing Git destination is not a bare repository: ${mirror}"
+          # rev-parse succeeds for non-bare .git directories too, so compare
+          # its output. A leftover git-full copy must not receive mirror refs.
+          local mirror_is_bare
+          mirror_is_bare=$(git -C "${mirror}" rev-parse --is-bare-repository 2>/dev/null || true)
+          if [[ "${mirror_is_bare}" != "true" ]]; then
+            pc_warn "existing Git destination is not a bare repository (e.g. a leftover git-full copy; remove it to recreate the mirror): ${mirror}"
             PC_BACKUP_FAILURES=$((PC_BACKUP_FAILURES + 1))
             return 0
           fi

@@ -245,6 +245,8 @@ git clone --mirror --no-hardlinks <source> <temporary-destination>
 
 成功後に一時ディレクトリを最終的な`.git/`へ移動する。2回目以降は、更新前refsを`refs/backup-snapshots/<timestamp>/`へ保存し、ローカルの元リポジトリから`refs/*`をfetchする。
 
+既存の`.git/`がbareリポジトリでない場合（`git-full`から`git-mirror`へ切り替えた後に残った旧コピー等）は、fetchせずにそのリポジトリを失敗として扱う。判定は`git rev-parse --is-bare-repository`の出力が`true`であることで行う（非bareの`.git/`でも終了コードは0になるため）。旧コピーを手動で削除すると、次回に新しいミラーが作成される。
+
 ミラーには復元用の独自configを保存する。
 
 ```ini
