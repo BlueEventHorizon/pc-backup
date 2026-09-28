@@ -16,6 +16,9 @@ source "${SCRIPT_DIR}/git-backup.sh"
 : "${PC_BACKUP_ENCRYPT_SECRETS:=1}"
 : "${PC_BACKUP_ALLOW_PLAINTEXT_SECRETS:=0}"
 : "${PC_BACKUP_DRY_RUN:=0}"
+: "${PC_BACKUP_CHECK_ONLY:=0}"
+# make check validates without comparing against the destination; it never writes.
+[[ "${PC_BACKUP_CHECK_ONLY}" != "1" ]] || PC_BACKUP_DRY_RUN=1
 : "${PC_BACKUP_RSYNC_DELETE:=1}"
 : "${PC_BACKUP_RETENTION_DAYS:=30}"
 
@@ -23,6 +26,7 @@ PC_BACKUP_TIMESTAMP="$(pc_timestamp)"
 PC_BACKUP_STARTED_AT="$(pc_iso_time)"
 PC_BACKUP_FAILURES=0
 PC_WARNING_COUNT=0
+PC_DRY_RUN_CHANGED=0
 PC_LOCK_DIR=""
 PC_WORK_DIR=""
 PC_LOG_FILE=""
@@ -62,7 +66,7 @@ pc_rsync_item() {
     source_real=$(pc_absolute_path "${source}" 2>/dev/null || printf '%s' "${source%/}")
     for repo in "${PC_GIT_REPOSITORIES[@]}"; do
       if [[ "${repo}" == "${source_real}" ]]; then
-        pc_log "Regular mirror delegated to Git mode: ${source}"
+        pc_dry_run_diff || pc_log "Regular mirror delegated to Git mode: ${source}"
         pc_record_file_manifest "${source}" "${storage_rel}" "mirror" "delegated-to-git"
         return 0
       fi
@@ -71,6 +75,22 @@ pc_rsync_item() {
         git_excludes+=("${exclude_rel}")
       fi
     done
+  fi
+
+  local opts=(-a --human-readable --itemize-changes)
+  [[ "${PC_BACKUP_RSYNC_DELETE}" == "1" && "${is_dir}" == "1" ]] && opts+=(--delete)
+  for exclude_rel in "${git_excludes[@]}"; do
+    opts+=("--exclude=/${exclude_rel}/")
+  done
+
+  if pc_dry_run_diff; then
+    if [[ "${is_dir}" == "1" ]]; then
+      pc_dry_run_rsync "rsync: ${source} -> ${storage_rel}" "${source}/" "${destination}/" "${opts[@]}"
+    else
+      pc_dry_run_rsync "rsync: ${source} -> ${storage_rel}" "${source}" "${destination}" "${opts[@]}"
+    fi
+    pc_record_file_manifest "${source}" "${storage_rel}" "mirror" "dry-run"
+    return 0
   fi
 
   pc_log "rsync: ${source} -> ${storage_rel}"
@@ -87,11 +107,6 @@ pc_rsync_item() {
       mkdir -p "$(dirname -- "${destination}")"
     fi
     change_file="${PC_BACKUP_ROOT}/.pc-backup/changes/${PC_BACKUP_TIMESTAMP}-${storage_rel//\//_}.txt"
-    local opts=(-a --human-readable --itemize-changes)
-    [[ "${PC_BACKUP_RSYNC_DELETE}" == "1" && "${is_dir}" == "1" ]] && opts+=(--delete)
-    for exclude_rel in "${git_excludes[@]}"; do
-      opts+=("--exclude=/${exclude_rel}/")
-    done
     if [[ "${is_dir}" == "1" ]]; then
       rsync "${opts[@]}" "${source}/" "${destination}/" > "${change_file}" 2>&1 || rc=$?
     else
@@ -354,7 +369,11 @@ main() {
   pc_acquire_lock
   pc_log "=== PC backup start ==="
   pc_log "Destination: ${PC_BACKUP_ROOT}"
-  [[ "${PC_BACKUP_DRY_RUN}" == "1" ]] && pc_log "Mode: dry-run"
+  if [[ "${PC_BACKUP_CHECK_ONLY}" == "1" ]]; then
+    pc_log "Mode: check (no comparison with destination)"
+  elif [[ "${PC_BACKUP_DRY_RUN}" == "1" ]]; then
+    pc_log "Mode: dry-run (only changes against the destination are shown)"
+  fi
 
   pc_backup_brew
   pc_prepare_git_repositories
@@ -369,6 +388,7 @@ main() {
     pc_log "=== PC backup completed with ${PC_BACKUP_FAILURES} failure(s) ==="
     return 1
   fi
+  pc_dry_run_diff && pc_log "DRY-RUN: ${PC_DRY_RUN_CHANGED} file/Git item(s) with changes (secrets, Brewfile and tool bundle are rewritten every run)"
   pc_log "=== PC backup complete (${PC_WARNING_COUNT} warning(s)) ==="
   [[ "${PC_BACKUP_DRY_RUN}" == "1" ]] || du -sh "${PC_BACKUP_ROOT}" 2>/dev/null | tee -a "${PC_LOG_FILE}" || true
 }

@@ -367,7 +367,7 @@ LaunchAgentには対話端末がないため、定期実行ではKeychain登録�
 - LaunchAgent stdout: `~/Library/Logs/pc-backup.log`
 - LaunchAgent stderr: `~/Library/Logs/pc-backup.err.log`
 
-Dry Runは保存先にログやマニフェストを書かない。
+`make check`とDry Runは保存先にログやマニフェストを書かない。
 
 ## 12. 安全設計
 
@@ -389,7 +389,7 @@ Dry Runは保存先にログやマニフェストを書かない。
 
 ### 12.3 排他制御
 
-`.pc-backup/locks/backup.lock/`を原子的に作成する。すでに存在する場合は二重起動と判定して停止する。ownerファイルにPID、開始時刻、hostnameを記録する。通常終了、エラー、シグナル時は`trap`で解放する。Dry Runではロックを作成しない。
+`.pc-backup/locks/backup.lock/`を原子的に作成する。すでに存在する場合は二重起動と判定して停止する。ownerファイルにPID、開始時刻、hostnameを記録する。通常終了、エラー、シグナル時は`trap`で解放する。`make check`とDry Runではロックを作成しない。
 
 ### 12.4 一時ファイルと更新
 
@@ -486,19 +486,31 @@ Pythonがあればプロジェクト専用`.venv`を作り、`requirements.txt`�
 | ターゲット | 処理 |
 |---|---|
 | `make setup` | Python/PyYAMLの準備 |
-| `make check` | 依存関係の確認のみ |
+| `make check` | 依存関係の確認と、設定・保存先・対象の事前確認（書き込みなし） |
 | `make init` | 保存先の初期化 |
-| `make dry-run` | バックアップDry Run |
+| `make dry-run` | 保存先との差分表示（書き込みなし） |
 | `make backup` | `caffeinate -i ./scripts/backup.sh`をそのまま実行 |
 | `make verify` | 整合性検証 |
 | `make run` | 本番バックアップ → 検証 |
-| `make first-backup` | setup → init → Dry Run → 本番 → 検証 |
+| `make first-backup` | setup → init → check → 本番 → 検証 |
 | `make restore-dry-run` | 全復元のDry Run |
 | `make restore` | 全復元（確認あり） |
 | `make test` | 統合テスト |
 | `make install-schedule` | LaunchAgent登録 |
 
-`make run`は手動運用と同じ`caffeinate -i ./scripts/backup.sh`の後に`./scripts/verify-backup.sh`を実行する。バックアップが失敗した場合は停止し、検証を実行しない。`make first-backup`はDry Run後に停止せず、続けて本番を実行する。目視確認を挟む場合は`make dry-run`と`make run`を分ける。
+`make run`は手動運用と同じ`caffeinate -i ./scripts/backup.sh`の後に`./scripts/verify-backup.sh`を実行する。バックアップが失敗した場合は停止し、検証を実行しない。`make first-backup`は確認後に停止せず、続けて本番を実行する。目視確認を挟む場合は`make check`（2回目以降は`make dry-run`）と`make run`を分ける。
+
+### 17.1 事前確認とDry Run
+
+`backup.sh`は書き込みを行わない2つのモードを持つ。どちらもロック、ログ、マニフェスト、`changes/`を保存先に作らない。
+
+- `PC_BACKUP_CHECK_ONLY=1`（`make check`）: 設定、保存先識別子、保存元と保存先の重複を検査し、Gitリポジトリの検出とモード判定を行い、対象を一覧表示する。保存先の中身とは比較しない。`PC_BACKUP_DRY_RUN=1`を暗黙に有効にする。
+- `PC_BACKUP_DRY_RUN=1`（`make dry-run`）: 同じ検査の後、保存先と比較して本番で変わる内容だけを表示する。差分のない対象は表示しない。
+  - 通常ファイルと`git-full`: 本番と同じ`rsync`オプション（`--delete`、Gitリポジトリ除外を含む）に`--dry-run --itemize-changes`を付けて実行し、`.`で始まる属性のみの変更行と`created directory`行を除いて表示する。保存先の親ディレクトリがまだない場合は空ディレクトリと比較する。
+  - `git-mirror`: ミラーがなければ新規作成として表示する。あれば元リポジトリの全refとミラーのrefを比較し、新規または指すオブジェクトが変わるrefを表示する。fetchはミラーだけにあるrefを削除しないため、それらは表示しない。LFSオブジェクトの差分は表示しない。
+  - `git-url`: `.pc-backup/git-url/<repo>.repo-info`の内容と、今回記録する値が異なる場合に表示する。
+  - 未コミット変更の保存、機密情報、Brewfile、ツール一式は毎回作り直すため、作成予定として表示する。
+  - 最後に、差分のあった通常ファイル・Git対象の件数を表示する。
 
 ## 18. 定期実行
 
@@ -525,7 +537,8 @@ Pythonがあればプロジェクト専用`.venv`を作り、`requirements.txt`�
 - 保存元と保存先の重複拒否
 - `files.mirror`と`git.roots`の重複時に、非Git文書をコピーしGit作業ツリーを除外すること
 - Git内で明示指定した単一ファイルを保存・復元できること
-- Dry Runが保存先へ書き込まないこと
+- `make check`とDry Runが保存先へ書き込まないこと
+- Dry Runが差分のない対象を表示せず、新規・削除ファイルとGit refの更新を表示すること
 - 通常ファイルのバックアップと復元
 - Gitミラーの作成、更新、更新前refsの保存
 - URLのみのGitリポジトリ
@@ -582,11 +595,11 @@ tests/
 ```bash
 make setup
 make init
-make dry-run
+make check
 make run
 ```
 
-Dry Run後に自動で本番へ進んでよい場合は、次の1コマンドでもよい。
+確認後に自動で本番へ進んでよい場合は、次の1コマンドでもよい。
 
 ```bash
 make first-backup

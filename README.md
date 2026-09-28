@@ -32,16 +32,16 @@ make first-backup
 
 1. PythonとPyYAMLの準備
 2. バックアップ先の初期化
-3. Dry Run
+3. 事前確認（`make check`）
 4. 本番バックアップ
 5. 整合性検証
 
-Dry Runの結果を目視確認してから本番を実行したい場合は、分けて実行する。
+確認結果を目視してから本番を実行したい場合は、分けて実行する。初回は保存先が空で全ファイルが差分になるため、`make dry-run`ではなく`make check`で対象を確認する。
 
 ```bash
 make setup
 make init
-make dry-run
+make check
 make run
 ```
 
@@ -136,13 +136,33 @@ security find-generic-password \
 ./scripts/init-backup-destination.sh
 ```
 
-### 6. Dry Runで対象と保存先を確認
+### 6. 事前確認とDry Run
 
-Dry Runはバックアップ先へデータを書き込まない。表示される`rsync`と`Git mirror`の左右のパスを確認する。
+どちらもバックアップ先へデータを書き込まない。
+
+`make check`は依存関係の確認に加え、設定、保存先識別子、保存元と保存先の重複を検査し、バックアップ対象を一覧表示する。保存先の中身とは比較しない。表示される`rsync`と`Git mirror`の左右のパスを確認する。
 
 ```bash
+make check
+# 依存関係以外の部分だけを実行する場合
+PC_BACKUP_CHECK_ONLY=1 ./scripts/backup.sh
+```
+
+`make dry-run`は保存先と比較し、本番を実行したときに変わる内容だけを表示する。差分のない対象は表示しない。
+
+```bash
+make dry-run
+# 同じ処理
 PC_BACKUP_DRY_RUN=1 ./scripts/backup.sh
 ```
+
+| 対象 | 表示内容 |
+|---|---|
+| 通常ファイル、`git-full` | `rsync --dry-run --itemize-changes`で転送・新規作成・削除（`*deleting`）されるファイル。パーミッションや更新時刻だけの変更（`.`で始まる行）は表示しない |
+| `git-mirror` | 新規作成されるミラー、または新規・更新されるref（`new`/`update`）。ミラーにだけ残るref（更新前スナップショット等）は表示しない |
+| `git-url` | 記録済みのURL・HEAD・branchから変わる場合 |
+| Gitの未コミット変更 | 保存される場合（`would capture Git local changes`） |
+| 機密情報、Brewfile、ツール一式 | 毎回作り直すため、差分にかかわらず作成予定として表示する |
 
 ### 7. 本番バックアップ
 
@@ -375,7 +395,7 @@ backup:
   rsync_delete: true
 ```
 
-最初にdry-runで対象を確認する。
+最初にdry-runで削除される内容（`*deleting`）を確認する。
 
 ```bash
 PC_BACKUP_DRY_RUN=1 ./scripts/backup.sh

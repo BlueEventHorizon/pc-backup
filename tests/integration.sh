@@ -105,8 +105,25 @@ if bash -c 'source "$1"; PC_BACKUP_ROOT="$2"; pc_validate_source_destination_sep
   fail "source/destination overlap was accepted"
 fi
 
-PC_BACKUP_DRY_RUN=1 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh"
+# make check validates and lists targets without comparing or writing.
+check_output="${TEST_ROOT}/check.log"
+PC_BACKUP_CHECK_ONLY=1 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" >"${check_output}"
+[[ ! -e "${TEST_BACKUP_ROOT}/.pc-backup" ]] || fail "check wrote backup metadata"
+grep -q '/Documents -> Documents$' "${check_output}" \
+  || fail "check did not list regular file targets"
+grep -q 'example.txt' "${check_output}" && fail "check unexpectedly listed file differences"
+
+# make dry-run compares with the (still empty) destination without writing.
+dry_run_output="${TEST_ROOT}/dry-run-initial.log"
+PC_BACKUP_DRY_RUN=1 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" >"${dry_run_output}"
 [[ ! -e "${TEST_BACKUP_ROOT}/.pc-backup" ]] || fail "dry-run wrote backup metadata"
+[[ ! -e "${TEST_BACKUP_ROOT}/Documents" ]] || fail "dry-run copied regular files"
+grep -q '>f+++++++++ example.txt' "${dry_run_output}" \
+  || fail "dry-run did not show a new regular file"
+grep -q 'would create Git mirror: .*/dev/project -> ' "${dry_run_output}" \
+  || fail "dry-run did not show a new Git mirror"
+grep -q 'Git full rsync: .*full-project' "${dry_run_output}" \
+  || fail "dry-run did not show a new git-full copy"
 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh"
 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/verify-backup.sh"
 
@@ -151,6 +168,14 @@ git -C "${mirror}" fsck --full >/dev/null
 git -C "${TEST_BACKUP_ROOT}/dev/worktree-main/.git" fsck --full >/dev/null
 git -C "${TEST_BACKUP_ROOT}/dev/worktree-linked/.git" fsck --full >/dev/null
 
+# Right after a backup, targets without changes are not shown by dry-run.
+dry_run_output="${TEST_ROOT}/dry-run-current.log"
+PC_BACKUP_DRY_RUN=1 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" >"${dry_run_output}"
+grep -q 'rsync: ' "${dry_run_output}" && fail "dry-run showed unchanged regular files"
+grep -q 'Git mirror: ' "${dry_run_output}" && fail "dry-run showed unchanged Git mirrors"
+grep -q 'Git full rsync: ' "${dry_run_output}" && fail "dry-run showed an unchanged git-full copy"
+grep -q 'Git URL inventory' "${dry_run_output}" && fail "dry-run showed unchanged URL-only metadata"
+
 # Simulate stale derived metadata left by an interrupted/background maintenance
 # run. The next backup must rebuild it from this mirror's reachable commits.
 git -C "${TEST_HOME}/dev/worktree-main" commit-graph write --reachable
@@ -167,6 +192,28 @@ printf 'second local change\n' >> "${TEST_HOME}/dev/project/tracked.txt"
 printf 'second untracked\n' > "${TEST_HOME}/dev/project/untracked-second.txt"
 rm "${TEST_HOME}/Documents/deleted-after-first.txt"
 rm "${TEST_HOME}/dev/full-container/full-project/deleted-after-first.txt"
+
+# dry-run shows exactly the pending changes and leaves the backup untouched.
+dry_run_output="${TEST_ROOT}/dry-run-changed.log"
+manifest_before=$(cksum < "${TEST_BACKUP_ROOT}/.pc-backup/manifests/manifest-latest.json")
+refs_before=$(git -C "${mirror}" for-each-ref | cksum)
+PC_BACKUP_DRY_RUN=1 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" >"${dry_run_output}"
+grep -qF '/Documents -> Documents (1 change(s))' "${dry_run_output}" \
+  || fail "dry-run did not summarize regular file changes"
+grep -q '\*deleting *deleted-after-first.txt' "${dry_run_output}" \
+  || fail "dry-run did not show a regular file deletion"
+grep -q 'update refs/heads/main' "${dry_run_output}" \
+  || fail "dry-run did not show an updated Git ref"
+grep -q 'deleting *deleted-after-first.txt' <(grep -A20 'Git full rsync' "${dry_run_output}") \
+  || fail "dry-run did not show a git-full deletion"
+grep -q 'worktree-main' "${dry_run_output}" && fail "dry-run showed an unchanged repository"
+[[ "$(cksum < "${TEST_BACKUP_ROOT}/.pc-backup/manifests/manifest-latest.json")" == "${manifest_before}" ]] \
+  || fail "dry-run updated the manifest"
+[[ "$(git -C "${mirror}" for-each-ref | cksum)" == "${refs_before}" ]] \
+  || fail "dry-run updated Git mirror refs"
+[[ -e "${TEST_BACKUP_ROOT}/Documents/deleted-after-first.txt" ]] \
+  || fail "dry-run deleted a regular file from the backup"
+
 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh"
 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/verify-backup.sh"
 snapshot_count=$(git -C "${mirror}" for-each-ref --count=1 refs/backup-snapshots | wc -l | tr -d ' ')

@@ -137,8 +137,8 @@ home/.secret-data/token.txt
 ### 6.2 初回バックアップ
 
 1. `init-backup-destination.sh`を実行する。
-2. `PC_BACKUP_DRY_RUN=1`で`backup.sh`を実行する。
-3. Dry Run後に`.pc-backup/`が作られていないことを確認する。
+2. `PC_BACKUP_CHECK_ONLY=1`で`backup.sh`を実行し、`.pc-backup/`が作られず、対象（`/Documents -> Documents`）が表示され、ファイル単位の差分（`example.txt`）が表示されないことを確認する。
+3. `PC_BACKUP_DRY_RUN=1`で`backup.sh`を実行し、`.pc-backup/`と`Documents/`が作られず、新規ファイル（`>f+++++++++ example.txt`）、新規Gitミラー（`would create Git mirror: .../dev/project`）、`git-full`の新規コピーが表示されることを確認する。
 4. 本番モードで`backup.sh`を実行する。
 5. `verify-backup.sh`を実行する。
 
@@ -157,15 +157,22 @@ home/.secret-data/token.txt
 - `.secret-data/encrypted-backup.tar.gpg`がある。
 - Gitミラーが`git fsck --full`に成功する。
 - `.pc-backup/tool/`に`Makefile`、`requirements.txt`、`scripts/`一式があり、`backup.yaml`がテスト用YAMLと同一で、`.venv`、`.git`、`tests`を含まない。
+- 直後に`PC_BACKUP_DRY_RUN=1`で実行すると、差分のない通常ファイル（`rsync: `）、Gitミラー、`git-full`、URL-onlyが表示されない。
 
 ### 6.4 更新バックアップ
 
 1. 通常Gitリポジトリの変更をcommitする。
 2. 新しいunstaged変更と未追跡ファイルを作る。
-3. `backup.sh`を再実行する。
-4. `verify-backup.sh`を再実行する。
-5. `refs/backup-snapshots/`に更新前refがあることを確認する。
-6. 元から削除した通常ファイルと`git-full`ファイルがミラーから削除されていることを確認する。
+3. `PC_BACKUP_DRY_RUN=1`で`backup.sh`を実行し、次を確認する。
+   - `Documents`が`(1 change(s))`で、`*deleting deleted-after-first.txt`が表示される。
+   - `update refs/heads/main`が表示される。
+   - `git-full`の`deleted-after-first.txt`の削除が表示される。
+   - 変更のない`worktree-main`が表示されない。
+   - `manifest-latest.json`、ミラーのrefs、削除予定のファイルが変更されていない。
+4. `backup.sh`を再実行する。
+5. `verify-backup.sh`を再実行する。
+6. `refs/backup-snapshots/`に更新前refがあることを確認する。
+7. 元から削除した通常ファイルと`git-full`ファイルがミラーから削除されていることを確認する。
 
 ### 6.5 完全復元
 
@@ -217,10 +224,10 @@ home/.secret-data/token.txt
 
 ## 9. 本番確認手順
 
-### 9.1 Dry Run
+### 9.1 事前確認とDry Run
 
 ```bash
-make dry-run
+make check
 ```
 
 次を目視確認する。
@@ -230,6 +237,15 @@ make dry-run
 - Gitリポジトリ数
 - `git-mirror`、`git-url`、`git-full`、`skip`の判定
 - Gitリポジトリが親ディレクトリの通常コピーから除外されること
+
+2回目以降は、本番前に保存先との差分を確認する。
+
+```bash
+make dry-run
+```
+
+- 表示された新規・更新・削除（`*deleting`）ファイルとGit refの更新が、意図した変更だけであること
+- 差分のない対象が表示されていないこと
 
 ### 9.2 本番バックアップと検証
 

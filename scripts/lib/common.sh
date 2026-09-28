@@ -166,6 +166,41 @@ pc_validate_source_destination_separation() {
   done
 }
 
+# Dry Run has two modes. PC_BACKUP_CHECK_ONLY=1 (make check) only validates the
+# configuration and lists targets. Otherwise (make dry-run) it compares each
+# target with the destination and prints only what a real backup would change.
+pc_dry_run_diff() {
+  [[ "${PC_BACKUP_DRY_RUN:-0}" == "1" && "${PC_BACKUP_CHECK_ONLY:-0}" != "1" ]]
+}
+
+# Print the changes rsync would make, or nothing when the destination is
+# current. Attribute-only lines (starting with ".") are not shown. A destination
+# whose parent does not exist yet is compared against an empty directory, since
+# rsync --dry-run cannot create missing parents.
+pc_dry_run_rsync() {
+  local label="$1" source="$2" destination="$3"
+  shift 3
+  local output changes count rc=0 parent="${destination%/}"
+  parent=$(dirname -- "${parent}")
+  if [[ ! -d "${parent}" ]]; then
+    destination="${PC_WORK_DIR}/dry-run-empty/${destination##*/}"
+    [[ "${source}" == */ ]] && destination="${destination%/}/"
+    mkdir -p "${PC_WORK_DIR}/dry-run-empty"
+  fi
+  output=$(rsync --dry-run --itemize-changes "$@" "${source}" "${destination}" 2>&1) || rc=$?
+  if [[ ${rc} -ne 0 ]]; then
+    pc_warn "rsync dry-run exit ${rc}: ${label}"
+    printf '%s\n' "${output}" | sed 's/^/    /'
+    return 0
+  fi
+  changes=$(printf '%s\n' "${output}" | grep -v -e '^\.' -e '^created directory ' -e '^$' || true)
+  [[ -n "${changes}" ]] || return 0
+  count=$(printf '%s\n' "${changes}" | wc -l | tr -d ' ')
+  pc_log "DRY-RUN: ${label} (${count} change(s))"
+  printf '%s\n' "${changes}" | sed 's/^/    /'
+  PC_DRY_RUN_CHANGED=$((${PC_DRY_RUN_CHANGED:-0} + 1))
+}
+
 pc_acquire_lock() {
   [[ "${PC_BACKUP_DRY_RUN:-0}" == "1" ]] && return 0
   local lock_root="${PC_BACKUP_ROOT}/.pc-backup/locks"

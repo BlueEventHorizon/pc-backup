@@ -251,6 +251,7 @@ pc_backup_one_git_repo() {
         capture_state=1
         if [[ "${PC_BACKUP_DRY_RUN:-0}" == "1" ]]; then
           pc_log "DRY-RUN: would capture Git local changes: ${repo}"
+          pc_dry_run_diff && PC_DRY_RUN_CHANGED=$((PC_DRY_RUN_CHANGED + 1))
         else
           pc_log "Git local changes captured: ${repo}"
         fi
@@ -281,13 +282,20 @@ pc_backup_one_git_repo() {
 
   case "${mode}" in
     skip)
-      pc_log "Git skip: ${repo}"
+      pc_dry_run_diff || pc_log "Git skip: ${repo}"
       pc_git_write_manifest_entry "${repo}" "" "skip" "${origin}" "${head}" "${branch}" "skipped"
       ;;
     git-url)
       info_file="${PC_BACKUP_ROOT}/.pc-backup/git-url/${rel}.repo-info"
       storage_rel="${info_file#${PC_BACKUP_ROOT}/}"
-      pc_log "Git URL inventory: ${repo}"
+      if pc_dry_run_diff; then
+        if [[ "$(cat -- "${info_file}" 2>/dev/null || true)" != "$(printf '%s\n%s\n%s\n%s' "${repo}" "${origin}" "${head}" "${branch}")" ]]; then
+          pc_log "DRY-RUN: Git URL inventory would change: ${repo} (HEAD ${head:-none}, branch ${branch})"
+          PC_DRY_RUN_CHANGED=$((PC_DRY_RUN_CHANGED + 1))
+        fi
+      else
+        pc_log "Git URL inventory: ${repo}"
+      fi
       if [[ "${PC_BACKUP_DRY_RUN:-0}" != "1" ]]; then
         mkdir -p "$(dirname -- "${info_file}")"
         {
@@ -304,10 +312,14 @@ pc_backup_one_git_repo() {
       mirror="${PC_BACKUP_ROOT}/${rel}"
       info_file="${PC_BACKUP_ROOT}/.pc-backup/git-full/${rel}.repo-info"
       storage_rel="${mirror#${PC_BACKUP_ROOT}/}"
-      pc_log "Git full rsync: ${repo} -> ${storage_rel}"
+      local full_rsync_opts=(-a)
+      [[ "${PC_BACKUP_RSYNC_DELETE:-1}" == "1" ]] && full_rsync_opts+=(--delete)
+      if pc_dry_run_diff; then
+        pc_dry_run_rsync "Git full rsync: ${repo} -> ${storage_rel}" "${repo}/" "${mirror}/" "${full_rsync_opts[@]}"
+      else
+        pc_log "Git full rsync: ${repo} -> ${storage_rel}"
+      fi
       if [[ "${PC_BACKUP_DRY_RUN:-0}" != "1" ]]; then
-        local full_rsync_opts=(-a)
-        [[ "${PC_BACKUP_RSYNC_DELETE:-1}" == "1" ]] && full_rsync_opts+=(--delete)
         mkdir -p "${mirror}" "$(dirname -- "${info_file}")"
         rsync "${full_rsync_opts[@]}" "${repo}/" "${mirror}/" \
           || PC_BACKUP_FAILURES=$((PC_BACKUP_FAILURES + 1))
@@ -325,7 +337,7 @@ pc_backup_one_git_repo() {
     git-mirror)
       mirror="${PC_BACKUP_ROOT}/${rel}/.git"
       storage_rel="${mirror#${PC_BACKUP_ROOT}/}"
-      pc_log "Git mirror: ${repo} -> ${storage_rel}"
+      pc_dry_run_diff || pc_log "Git mirror: ${repo} -> ${storage_rel}"
       if [[ "${PC_BACKUP_DRY_RUN:-0}" != "1" ]]; then
         mkdir -p "$(dirname -- "${mirror}")"
         local mirror_is_bare="true"
@@ -389,6 +401,9 @@ pc_backup_one_git_repo() {
         if [[ -e "${mirror}" || -L "${mirror}" ]] \
           && [[ "$(git -C "${mirror}" rev-parse --is-bare-repository 2>/dev/null || true)" != "true" ]]; then
           pc_log "DRY-RUN: would ask to replace non-bare Git destination: ${PC_BACKUP_ROOT}/${rel}"
+          pc_dry_run_diff && PC_DRY_RUN_CHANGED=$((PC_DRY_RUN_CHANGED + 1))
+        elif pc_dry_run_diff; then
+          pc_git_dry_run_mirror_refs "${repo}" "${mirror}" "${storage_rel}"
         fi
         verification="dry-run"
       fi
@@ -398,6 +413,32 @@ pc_backup_one_git_repo() {
       pc_die "invalid Git backup mode: ${mode}"
       ;;
   esac
+}
+
+# Show the refs a mirror fetch would create or move. Refs that exist only in
+# the mirror (snapshots, refs deleted from the source) are kept by fetch and
+# therefore not reported.
+pc_git_dry_run_mirror_refs() {
+  local repo="$1" mirror="$2" storage_rel="$3" source_refs mirror_refs changes count
+  if [[ ! -d "${mirror}" ]]; then
+    count=$(git -C "${repo}" for-each-ref --format='%(refname)' | wc -l | tr -d ' ')
+    pc_log "DRY-RUN: would create Git mirror: ${repo} -> ${storage_rel} (${count} ref(s))"
+    PC_DRY_RUN_CHANGED=$((PC_DRY_RUN_CHANGED + 1))
+    return 0
+  fi
+  source_refs="${PC_WORK_DIR}/dry-run-source-refs"
+  mirror_refs="${PC_WORK_DIR}/dry-run-mirror-refs"
+  git -C "${repo}" for-each-ref --format='%(objectname) %(refname)' > "${source_refs}"
+  git -C "${mirror}" for-each-ref --format='%(objectname) %(refname)' > "${mirror_refs}"
+  changes=$(awk 'NR == FNR { known[$2] = $1; next }
+    !($2 in known) { print "new    " $2; next }
+    known[$2] != $1 { print "update " $2 " " substr(known[$2], 1, 12) ".." substr($1, 1, 12) }' \
+    "${mirror_refs}" "${source_refs}")
+  [[ -n "${changes}" ]] || return 0
+  count=$(printf '%s\n' "${changes}" | wc -l | tr -d ' ')
+  pc_log "DRY-RUN: Git mirror: ${repo} -> ${storage_rel} (${count} ref change(s))"
+  printf '%s\n' "${changes}" | sed 's/^/    /'
+  PC_DRY_RUN_CHANGED=$((PC_DRY_RUN_CHANGED + 1))
 }
 
 pc_git_repo_seen() {
