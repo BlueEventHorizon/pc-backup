@@ -128,6 +128,43 @@ pc_git_copy_local_lfs() {
   rsync -a "${source_lfs}/" "${mirror}/lfs/objects/"
 }
 
+# True when a source ref is missing from the mirror or points elsewhere, i.e.
+# a fetch would change something. Refs that exist only in the mirror (deleted
+# branches, snapshots) do not count: fetch never removes them. Any failure to
+# list refs counts as "needs fetch" so an unreadable mirror is never skipped.
+pc_git_mirror_needs_fetch() {
+  local repo="$1" mirror="$2" source_refs mirror_refs
+  source_refs=$(git -C "${repo}" for-each-ref --format='%(objectname) %(refname)' 2>/dev/null) || return 0
+  mirror_refs=$(git -C "${mirror}" for-each-ref --format='%(objectname) %(refname)' 2>/dev/null) || return 0
+  [[ -n "$(comm -23 <(printf '%s\n' "${source_refs}" | sort) <(printf '%s\n' "${mirror_refs}" | sort))" ]]
+}
+
+pc_git_set_mirror_config() {
+  local mirror="$1" repo="$2" origin="$3" rel="$4"
+  git -C "${mirror}" config backup.originalPath "${repo}"
+  git -C "${mirror}" config backup.originalOrigin "${origin}"
+  git -C "${mirror}" config backup.mode git-mirror
+  git -C "${mirror}" config backup.statePath ".pc-backup/git-state/${rel}"
+}
+
+pc_git_mirror_config_current() {
+  local mirror="$1" repo="$2" origin="$3"
+  [[ "$(git -C "${mirror}" config --get backup.originalPath 2>/dev/null || true)" == "${repo}" ]] \
+    && [[ "$(git -C "${mirror}" config --get backup.originalOrigin 2>/dev/null || true)" == "${origin}" ]] \
+    && [[ "$(git -C "${mirror}" config --get backup.mode 2>/dev/null || true)" == "git-mirror" ]]
+}
+
+# A clean repository whose recorded state is already "clean" needs no rewrite.
+# Dirty repositories are always rewritten so patch and untracked content stay
+# current.
+pc_git_state_is_current() {
+  local state_dir="$1"
+  [[ "${PC_GIT_STAGED}" == "false" && "${PC_GIT_UNSTAGED}" == "false" && "${PC_GIT_UNTRACKED_COUNT}" -eq 0 ]] || return 1
+  [[ -f "${state_dir}/status.json" ]] || return 1
+  [[ ! -e "${state_dir}/staged.patch" && ! -e "${state_dir}/unstaged.patch" && ! -e "${state_dir}/untracked.tar.gz" ]] || return 1
+  grep -q "\"staged\":false,\"unstaged\":false,\"untracked_count\":0,\"stash_count\":${PC_GIT_STASH_COUNT}," "${state_dir}/status.json"
+}
+
 pc_git_write_manifest_entry() {
   local repo="$1" storage_rel="$2" mode="$3" origin="$4" head="$5" branch="$6" verification="$7"
   {
@@ -152,6 +189,53 @@ pc_git_confirm() {
   printf '%s [y/N] ' "${prompt}" > /dev/tty
   IFS= read -r answer < /dev/tty || return 1
   case "${answer}" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
+}
+
+# Like pc_git_confirm, but "a" answers yes for every remaining stale mirror.
+pc_git_confirm_remove_stale() {
+  local prompt="$1" answer
+  [[ "${PC_BACKUP_ASSUME_YES:-0}" != "1" ]] || return 0
+  [[ "${PC_GIT_STALE_REMOVE_ALL:-0}" != "1" ]] || return 0
+  [[ -t 0 || -t 1 || -t 2 ]] || return 1
+  printf '%s [y/N/a(ll)] ' "${prompt}" > /dev/tty
+  IFS= read -r answer < /dev/tty || return 1
+  case "${answer}" in
+    a|A|all|ALL) PC_GIT_STALE_REMOVE_ALL=1; return 0 ;;
+    y|Y|yes|YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# A repository switched from git-mirror to git-url keeps its old mirror in the
+# destination. Restore clones mirrors before git-url records and skips
+# destinations that already exist, so the stale mirror would win over the
+# current record. Remove it only after confirmation: history kept only in the
+# mirror (refs/backup-snapshots) is lost with it. Non-interactive runs keep it
+# and warn.
+pc_git_remove_stale_mirror() {
+  local rel="$1" mirror
+  mirror="${PC_BACKUP_ROOT}/${rel}/.git"
+  [[ -d "${mirror}" ]] || return 0
+  [[ "$(git -C "${mirror}" config --get backup.mode 2>/dev/null || true)" == "git-mirror" ]] || return 0
+  [[ "$(git -C "${mirror}" rev-parse --is-bare-repository 2>/dev/null || true)" == "true" ]] || return 0
+
+  if pc_dry_run_diff; then
+    pc_log "DRY-RUN: would ask to remove stale Git mirror (now git-url): ${rel}/.git"
+    PC_DRY_RUN_CHANGED=$((PC_DRY_RUN_CHANGED + 1))
+    return 0
+  fi
+  if ! pc_git_confirm_remove_stale "Git mirror left from before switching to git-url: ${mirror}
+Delete it? Restore uses the git-url record instead. History kept only in the mirror (refs/backup-snapshots) is lost."; then
+    pc_warn "stale Git mirror kept; restore would prefer it over the git-url record. Run make backup in a terminal to remove it, or remove it manually: ${mirror}"
+    return 0
+  fi
+  if rm -rf -- "${mirror}"; then
+    rmdir "${PC_BACKUP_ROOT}/${rel}" 2>/dev/null || true
+    pc_log "Removed stale Git mirror: ${rel}/.git"
+  else
+    pc_warn "failed to remove stale Git mirror: ${mirror}"
+    PC_BACKUP_FAILURES=$((PC_BACKUP_FAILURES + 1))
+  fi
 }
 
 # Replace a non-bare copy (e.g. left after switching git-full to git-mirror)
@@ -262,7 +346,8 @@ pc_backup_one_git_repo() {
     esac
   fi
 
-  if [[ "${is_bare}" != "true" && "${PC_BACKUP_DRY_RUN:-0}" != "1" ]]; then
+  if [[ "${is_bare}" != "true" && "${PC_BACKUP_DRY_RUN:-0}" != "1" ]] \
+    && ! pc_git_state_is_current "${state_dir}"; then
     pc_git_store_state "${repo}" "${state_dir}" "${capture_state}"
   fi
   if [[ ${reject_dirty} -eq 1 ]]; then
@@ -272,7 +357,12 @@ pc_backup_one_git_repo() {
 
   if [[ "${mode}" == "git-url" ]]; then
     [[ -n "${origin}" ]] || unsafe=1
-    [[ "${PC_GIT_STAGED}" == "false" && "${PC_GIT_UNSTAGED}" == "false" && "${PC_GIT_UNTRACKED_COUNT}" -eq 0 ]] || unsafe=1
+    # Local changes are safe for git-url only when they are saved as patches
+    # (dirty_mode backup); restore clones, checks out the recorded HEAD and
+    # applies them. With warn they would be lost, so promote to git-mirror.
+    if [[ ${capture_state} -ne 1 ]]; then
+      [[ "${PC_GIT_STAGED}" == "false" && "${PC_GIT_UNSTAGED}" == "false" && "${PC_GIT_UNTRACKED_COUNT}" -eq 0 ]] || unsafe=1
+    fi
     [[ "${PC_GIT_AHEAD_COUNT}" -eq 0 && "${PC_GIT_LOCAL_BRANCH_COUNT}" -eq 0 && "${PC_GIT_STASH_COUNT}" -eq 0 ]] || unsafe=1
     if [[ ${unsafe} -eq 1 ]]; then
       pc_warn "git-url is unsafe; promoted to git-mirror: ${repo}"
@@ -296,7 +386,9 @@ pc_backup_one_git_repo() {
       else
         pc_log "Git URL inventory: ${repo}"
       fi
-      if [[ "${PC_BACKUP_DRY_RUN:-0}" != "1" ]]; then
+      if [[ "${PC_BACKUP_DRY_RUN:-0}" != "1" ]] \
+        && [[ "$(cat -- "${info_file}" 2>/dev/null || true)" != "$(printf '%s\n%s\n%s\n%s' "${repo}" "${origin}" "${head}" "${branch}")" ]]; then
+        # Rewriting an identical file still makes cloud storage sync it.
         mkdir -p "$(dirname -- "${info_file}")"
         {
           printf '%s\n' "${repo}"
@@ -305,6 +397,10 @@ pc_backup_one_git_repo() {
           printf '%s\n' "${branch}"
         } > "${info_file}"
         chmod 600 "${info_file}"
+      fi
+      # make check must not read the destination (see the git-mirror branch).
+      if [[ "${PC_BACKUP_CHECK_ONLY:-0}" != "1" ]]; then
+        pc_git_remove_stale_mirror "${rel}"
       fi
       pc_git_write_manifest_entry "${repo}" "${storage_rel}" "git-url" "${origin}" "${head}" "${branch}" "metadata-only"
       ;;
@@ -340,7 +436,7 @@ pc_backup_one_git_repo() {
       pc_dry_run_diff || pc_log "Git mirror: ${repo} -> ${storage_rel}"
       if [[ "${PC_BACKUP_DRY_RUN:-0}" != "1" ]]; then
         mkdir -p "$(dirname -- "${mirror}")"
-        local mirror_is_bare="true"
+        local mirror_is_bare="true" mirror_state="updated" local_mirror=""
         if [[ -d "${mirror}" ]]; then
           # rev-parse succeeds for non-bare .git directories too, so compare
           # its output. A leftover git-full copy must not receive mirror refs.
@@ -354,49 +450,89 @@ pc_backup_one_git_repo() {
             PC_BACKUP_FAILURES=$((PC_BACKUP_FAILURES + 1))
             return 0
           fi
+          mirror_state="replaced"
         elif [[ ! -d "${mirror}" ]]; then
-          tmp_dir=$(mktemp -d "$(dirname -- "${mirror}")/.git-mirror.XXXXXX")
-          tmp_mirror="${tmp_dir}/repository.git"
-          if git clone --mirror --no-hardlinks "${repo}" "${tmp_mirror}"; then
-            mv "${tmp_mirror}" "${mirror}"
-            rmdir "${tmp_dir}"
-          else
-            rm -rf "${tmp_dir}"
+          # Build and verify a new mirror on local disk, then place the checked
+          # copy in the destination. Reading a whole mirror back from cloud
+          # storage (fsck) takes minutes per repository.
+          local_mirror=$(mktemp -d "${PC_LOCAL_WORK_DIR}/mirror.XXXXXX")/repository.git
+          if ! git clone --mirror --no-hardlinks "${repo}" "${local_mirror}"; then
+            rm -rf -- "$(dirname -- "${local_mirror}")"
             pc_warn "failed to create Git mirror: ${repo}"
             PC_BACKUP_FAILURES=$((PC_BACKUP_FAILURES + 1))
             return 0
           fi
-        else
+          if [[ "${PC_BACKUP_GIT_VERIFY:-1}" == "1" ]]; then
+            if git -C "${local_mirror}" fsck --full >/dev/null; then
+              verification="ok"
+            else
+              rm -rf -- "$(dirname -- "${local_mirror}")"
+              pc_warn "new Git mirror failed verification; not saved: ${repo}"
+              PC_BACKUP_FAILURES=$((PC_BACKUP_FAILURES + 1))
+              pc_git_write_manifest_entry "${repo}" "${storage_rel}" "git-mirror" "${origin}" "${head}" "${branch}" "failed"
+              return 0
+            fi
+          fi
+          pc_git_set_mirror_config "${local_mirror}" "${repo}" "${origin}" "${rel}"
+          tmp_dir=$(mktemp -d "$(dirname -- "${mirror}")/.git-mirror.XXXXXX")
+          if ! rsync -a "${local_mirror}/" "${tmp_dir}/repository.git/" \
+            || ! mv "${tmp_dir}/repository.git" "${mirror}"; then
+            rm -rf -- "${tmp_dir}" "$(dirname -- "${local_mirror}")"
+            pc_warn "failed to place Git mirror: ${repo}"
+            PC_BACKUP_FAILURES=$((PC_BACKUP_FAILURES + 1))
+            return 0
+          fi
+          rmdir "${tmp_dir}"
+          rm -rf -- "$(dirname -- "${local_mirror}")"
+          mirror_state="created"
+        elif pc_git_mirror_needs_fetch "${repo}" "${mirror}"; then
           pc_git_snapshot_refs "${mirror}" "${PC_BACKUP_TIMESTAMP}"
-          # A fetch may start detached auto-maintenance. When many linked
-          # worktrees share one object store, its repack/MIDX update can still
-          # be running when the fsck below starts, producing transient
-          # "packfile ... cannot be accessed" failures. Backup verification
-          # needs a stable object directory, so do not launch maintenance or
-          # rewrite the commit graph from this fetch.
+          # Do not launch detached maintenance from this fetch: with many linked
+          # worktrees sharing one object store its repack can still be running
+          # when verify-backup.sh checks the mirror.
           if ! git -C "${mirror}" fetch --no-auto-maintenance --no-write-commit-graph \
             "${repo}" '+refs/*:refs/*'; then
             pc_warn "failed to update Git mirror: ${repo}"
             PC_BACKUP_FAILURES=$((PC_BACKUP_FAILURES + 1))
             return 0
           fi
-          head_ref=$(git -C "${repo}" symbolic-ref --quiet HEAD 2>/dev/null || true)
-          [[ -z "${head_ref}" ]] || git -C "${mirror}" symbolic-ref HEAD "${head_ref}"
+          mirror_state="updated"
+        else
+          mirror_state="unchanged"
         fi
-        git -C "${mirror}" config backup.originalPath "${repo}"
-        git -C "${mirror}" config backup.originalOrigin "${origin}"
-        git -C "${mirror}" config backup.mode git-mirror
-        git -C "${mirror}" config backup.statePath ".pc-backup/git-state/${rel}"
+
+        # HEAD can change (branch switch) without any ref changing.
+        head_ref=$(git -C "${repo}" symbolic-ref --quiet HEAD 2>/dev/null || true)
+        if [[ -n "${head_ref}" && "$(git -C "${mirror}" symbolic-ref --quiet HEAD 2>/dev/null || true)" != "${head_ref}" ]]; then
+          git -C "${mirror}" symbolic-ref HEAD "${head_ref}"
+        fi
+        if [[ "${mirror_state}" != "created" ]] && ! pc_git_mirror_config_current "${mirror}" "${repo}" "${origin}"; then
+          pc_git_set_mirror_config "${mirror}" "${repo}" "${origin}" "${rel}"
+        fi
         pc_git_copy_local_lfs "${repo}" "${mirror}"
-        pc_git_repair_commit_graph "${mirror}" || true
-        if [[ "${PC_BACKUP_GIT_VERIFY:-1}" == "1" ]]; then
-          if git -C "${mirror}" fsck --full >/dev/null; then
-            verification="ok"
-          else
-            verification="failed"
-            PC_BACKUP_FAILURES=$((PC_BACKUP_FAILURES + 1))
-          fi
-        fi
+        case "${mirror_state}" in
+          unchanged)
+            verification="unchanged"
+            ;;
+          updated)
+            pc_git_repair_commit_graph "${mirror}" || true
+            # fetch already checks pack integrity and connectivity of what it
+            # received. A full fsck of an existing mirror reads every object
+            # back from the destination; verify-backup.sh does that instead.
+            verification="fetched"
+            ;;
+          replaced)
+            pc_git_repair_commit_graph "${mirror}" || true
+            if [[ "${PC_BACKUP_GIT_VERIFY:-1}" == "1" ]]; then
+              if git -C "${mirror}" fsck --full >/dev/null; then
+                verification="ok"
+              else
+                verification="failed"
+                PC_BACKUP_FAILURES=$((PC_BACKUP_FAILURES + 1))
+              fi
+            fi
+            ;;
+        esac
       else
         # make check (PC_BACKUP_CHECK_ONLY=1) must not read the destination:
         # on File Provider storage such as OneDrive, reading a mirror can block

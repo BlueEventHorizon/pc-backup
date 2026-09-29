@@ -96,8 +96,9 @@ source "${SCRIPT_DIR}/lib/common.sh"
 skip（完全一致） > full（完全一致 or 親ディレクトリ配下） > url_only（完全一致） > default_mode
 ```
 
-- `git-mirror`: `git clone --mirror`で作業ツリーなしのミラーを`<repo>/.git/`へ保存。2回目以降は更新前refsを`refs/backup-snapshots/<timestamp>/`へ退避してから`fetch`。
-- `git-url`: リモートURL・HEAD・branchのみ記録。remote URLがある／作業ツリーがclean／unpushedコミットなし／upstreamのないローカルブランチなし／stashなし、の全条件を満たさない場合は自動的に`git-mirror`へ昇格する（データ損失防止のための安全側フォールバック）。
+- `git-mirror`: `git clone --mirror`で作業ツリーなしのミラーを`<repo>/.git/`へ保存。新規ミラーはローカル（`PC_LOCAL_WORK_DIR`）で作って`fsck`し、検査後に保存先へ置く。2回目以降は、元のrefsがミラーと違うときだけ、更新前refsを`refs/backup-snapshots/<timestamp>/`へ退避してから`fetch`する（同じなら何も書かない、更新時の`fsck`もしない。全体検査は`verify-backup.sh`）。OneDrive等では保存先の読み戻しが遅いため、この設計を崩さないこと。
+- `git-url`: リモートURL・HEAD・branchのみ記録。remote URLがある／unpushedコミットなし／upstreamのないローカルブランチなし／stashなし、の全条件を満たさない場合は自動的に`git-mirror`へ昇格する（データ損失防止のための安全側フォールバック）。作業ツリーの変更は`dirty_mode: backup`なら`git-state/`の差分として保存されるので昇格理由にならない（`warn`のときは昇格）。復元はcloneのあと記録したbranch/HEADへ切り替えて差分を適用する。
+- `git-url`が確定したリポジトリの保存先に、以前の`git-mirror`が残っている場合は、確認のうえで削除する（復元は`.git`ミラーを`git-url`より先にcloneするため、古いミラーが優先されてしまう）。非対話実行では削除せず警告のみ。
 - `git-full`: 作業ツリーを含めて`rsync`。
 - `dirty_mode`（`backup`/`warn`/`fail`）: staged/unstaged差分と未追跡ファイル（gitignore対象は含まない）の扱いを決める。`.env`など秘密情報の追跡除外ファイルは`secrets.paths`へ明示的に含める必要がある。
 

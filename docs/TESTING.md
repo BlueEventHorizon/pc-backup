@@ -174,6 +174,7 @@ home/.secret-data/token.txt
 5. `verify-backup.sh`を再実行する。
 6. `refs/backup-snapshots/`に更新前refがあることを確認する。
 7. 元から削除した通常ファイルと`git-full`ファイルがミラーから削除されていることを確認する。
+8. マニフェストで、refsが変わった`dev/project`の`verification`が`fetched`、変わらなかった`dev/worktree-main`が`unchanged`であることを確認する。変わらなかった`dev/worktree-main`のミラーに`refs/backup-snapshots/`が作られていない（触られていない）ことも確認する。
 
 ### 6.5 完全復元
 
@@ -184,10 +185,24 @@ home/.secret-data/token.txt
 5. 通常文書の内容を比較する。
 6. Gitのbranch、tracked内容、unstaged差分、未追跡ファイルを検査する。
 7. Git内の個別コピーファイルを検査する。
-8. URL-onlyリポジトリの内容を検査する。
+8. URL-onlyリポジトリの内容を検査する。このリポジトリは作業ツリーに変更（unstagedの`NOTES.md`と未追跡の`url-local.txt`）を持つが、`git-mirror`に昇格せず`git-url`のままバックアップされる。バックアップ後にリモートへ新しいコミットを追加しておき、復元後に次を確認する。
+   - HEADが記録したコミットで、リモートの新しいコミット（`advance.txt`）を含まない。
+   - unstaged変更と未追跡ファイルが復元されている。
 9. `full`対象のgitignoreファイルを検査する。
 10. 復号した`token.txt`の内容を比較する。
 11. URL-onlyリポジトリのリモートを移動して復元をやり直し、`git clone`の失敗が`ERROR:`と末尾の失敗一覧に出て終了コードが0以外になり、前後のリポジトリ（`dev/project`、`full-project`）は復元され、失敗したリポジトリのディレクトリが残らないことを確認する。確認後に元の状態へ戻す。
+
+### 6.5.1 古いGitミラーの削除
+
+`git-mirror`から`git-url`へ切り替えた後の古いミラーを模擬する。
+
+1. `dev/url-project/.git`に、`backup.mode=git-mirror`を設定したbareミラーを作る。
+2. `PC_BACKUP_CHECK_ONLY=1`で`backup.sh`を実行し、`stale Git mirror`が出力されない（保存先を読まない）ことを確認する。
+3. `PC_BACKUP_DRY_RUN=1`で実行し、`would ask to remove stale Git mirror (now git-url): dev/url-project/.git`が出力され、ミラーが残っていることを確認する。
+4. 標準入力を`/dev/null`にした非対話で`backup.sh`を実行し、成功（終了コード0）し、`stale Git mirror kept`の警告が出て、ミラーが残っていることを確認する。
+5. `PC_BACKUP_ASSUME_YES=1`で`backup.sh`を実行し、ミラーが削除され、`.pc-backup/git-url/dev/url-project.repo-info`が残っていることを確認する。
+
+対話端末での`y`/`a`入力は自動テストの対象外である。
 
 ### 6.6 非bare保存先の拒否と置き換え
 

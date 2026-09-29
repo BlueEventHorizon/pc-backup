@@ -175,7 +175,7 @@ schedule:
 | `git.exclude_names` | string list | 上記例 | Git探索時にpruneするディレクトリ名 |
 | `git.dirty_mode` | enum | `backup` | `backup` / `warn` / `fail` |
 | `git.lfs_mode` | enum | `local` | `local` / `warn` / `skip` |
-| `git.verify` | boolean | `true` | 保存後の`git fsck --full` |
+| `git.verify` | boolean | `true` | 新規ミラーをローカルで`git fsck --full`してから保存先へ置く。既存ミラーの更新では実行しない |
 | `secrets.paths` | path list | `[]` | 暗号化アーカイブへ入れるパス |
 | `secrets.encryption.enabled` | boolean | `true` | GPG暗号化 |
 | `secrets.encryption.allow_plaintext` | boolean | `false` | 暗号化無効時の平文保存許可 |
@@ -244,7 +244,16 @@ ${HOME}/data/dev/example-app/ -> git.default_modeまたは例外モード
 git clone --mirror --no-hardlinks <source> <temporary-destination>
 ```
 
-成功後に一時ディレクトリを最終的な`.git/`へ移動する。2回目以降は、更新前refsを`refs/backup-snapshots/<timestamp>/`へ保存し、ローカルの元リポジトリから`refs/*`をfetchする。
+成功後に一時ディレクトリを最終的な`.git/`へ移動する。
+
+新規ミラーは、ローカルディスクの作業ディレクトリ（`PC_LOCAL_WORK_DIR`、`$TMPDIR`配下）へ`clone --mirror`し、`git.verify`が有効なら`git fsck --full`とconfig設定をローカルで済ませる。検査に成功したものだけを保存先の一時ディレクトリへ`rsync`し、`mv`で最終的な`.git/`に置く。OneDriveなどのFile Provider配下では、保存先のミラーを読み戻す`fsck`が1リポジトリ数分かかるためである。
+
+2回目以降は、元リポジトリの各refがミラーにない、または別のオブジェクトを指す場合だけ更新する。ミラーにだけあるref（削除済みブランチ、スナップショット）は比較に含めない。
+
+- 更新あり: 更新前refsを`refs/backup-snapshots/<timestamp>/`へ保存し、ローカルの元リポジトリから`refs/*`をfetchする。`fsck`は行わない（fetchがパックの整合性と接続性を検査する。保存済みミラーの全体検査は`verify-backup.sh`）。マニフェストの`verification`は`fetched`。
+- 更新なし: スナップショット、fetch、commit-graph検査、`fsck`を行わない。HEADの指すbranchが変わっていれば`HEAD`だけ更新し、`backup.*`のconfigが古ければ書き直す。マニフェストの`verification`は`unchanged`。
+
+Git状態（`git-state/`）は、作業ツリーがcleanで、記録済みの状態（staged/unstaged/未追跡数/stash数）と同じなら書き直さない。差分や未追跡ファイルがあるリポジトリは、内容が変わっていても検出できるよう毎回書き直す。
 
 既存の`.git`がbareリポジトリでない場合（`git-full`から`git-mirror`へ切り替えた後に残った旧コピー等。linked worktreeのコピーでは`.git`がファイルになる）は、既存ミラーとしてfetchしない。判定は`git rev-parse --is-bare-repository`の出力が`true`であることで行う（非bareの`.git/`でも終了コードは0になるため）。
 
@@ -257,6 +266,19 @@ git clone --mirror --no-hardlinks <source> <temporary-destination>
 5. 古い`.pc-backup/git-full/<repo>.repo-info`と退避先を削除する。
 
 途中で失敗した場合は退避先を残し、そのパスを警告する。旧コピーの中に別の検出済みリポジトリがある場合は、そのミラーを巻き込まないよう自動置き換えせず失敗として扱う。Dry Runでは置き換え対象をログに出すだけとする。
+
+### 古いGitミラーの削除（git-mirrorからgit-urlへの切り替え）
+
+リポジトリが`git-url`に切り替わっても、保存先の`<repo>/.git`（`backup.mode=git-mirror`のbareリポジトリ）は残る。復元は`.git`ミラーを先にcloneし、復元先が存在すれば`git-url`をスキップするため、更新されない古いミラーが最新の`git-url`記録より優先されてしまう。
+
+`git-url`が確定したリポジトリ（自動昇格していないもの）で、`git-url`の記録を書き終えたあとに、古いミラーを次のとおり扱う。
+
+1. 保存先の`.git`が、`backup.mode=git-mirror`かつbareであるときだけ対象とする。それ以外は触れない。
+2. 対話端末で削除を確認する（`y`: このミラー、`a`: 残りすべて、それ以外: 残す）。`PC_BACKUP_ASSUME_YES=1`なら確認しない。
+3. 非対話実行、または拒否時は削除せず、警告だけを出す（終了コードには影響しない）。
+4. 削除するのは`.git`ディレクトリだけである。`files.mirror`で個別指定したファイルなど、同じディレクトリの他の内容は残す。ミラーだけが持つ`refs/backup-snapshots/`の履歴は失われる。
+
+Dry Runは削除予定を`would ask to remove stale Git mirror`と表示し、削除しない。`make check`は保存先を読まないため何もしない。
 
 ミラーには復元用の独自configを保存する。
 
@@ -273,7 +295,7 @@ git clone --mirror --no-hardlinks <source> <temporary-destination>
 URLのみの保存は、次の全条件を満たす場合だけ許可する。
 
 - remote URLがある。
-- staged、unstaged、未追跡ファイルがない。
+- staged、unstaged、未追跡ファイルがない。ただし`dirty_mode: backup`でこれらを差分として保存する場合は、この条件を求めない（復元時に適用する）。
 - upstreamより先行したコミットがない。
 - upstreamのないローカルブランチがない。
 - stashがない。
@@ -346,7 +368,7 @@ LaunchAgentには対話端末がないため、定期実行ではKeychain登録�
 - 復元に必要な`Makefile`、`README.md`、`requirements.txt`、`scripts/`（`__pycache__`と`.DS_Store`は除外）
 - 実行時に読み込んだ設定ファイル（`PC_BACKUP_CONFIG`指定時はそのファイル）を`backup.yaml`として、権限`600`で保存
 
-`.pc-backup/.tool.*`へ作成してから旧`tool/`と入れ替える。Dry Runでは書き込まない。バックアップ先の内部から実行された場合は、自身を入れ替えないよう更新しない。復元時は`tool/`をローカルへコピーし、同梱の`backup.yaml`で`restore.sh`を実行する。
+ローカルディスク上で組み立て、保存先の`tool/`と内容（`diff -r`）が同じなら何もしない。異なる場合だけ`.pc-backup/.tool.*`へ作成してから旧`tool/`と入れ替える。Dry Runでは書き込まない。バックアップ先の内部から実行された場合は、自身を入れ替えないよう更新しない。復元時は`tool/`をローカルへコピーし、同梱の`backup.yaml`で`restore.sh`を実行する。
 
 ## 11. マニフェストとログ
 
@@ -449,7 +471,7 @@ LaunchAgentには対話端末がないため、定期実行ではKeychain登録�
 ### 15.2 Git
 
 - `git-mirror`: ミラーを`fsck`後に元パスへcloneし、refs、origin URL、staged/unstaged差分、未追跡ファイルを復元する。
-- `git-url`: 記録済みURLからcloneし、HEADの相違を警告する。
+- `git-url`: 記録済みURLからcloneし、記録したbranchとHEADへ`checkout -B`（detachedなら`checkout <HEAD>`）で切り替え、`git-state/`の差分（staged・unstaged・未追跡ファイル）を適用する。記録したHEADがリモートにない場合や差分の適用に失敗した場合は、復元失敗として記録して続行する。
 - `git-full`: 記録した保存先から元パスへ`rsync`する。
 - 復元先が存在するGitリポジトリは上書きせずスキップする。
 

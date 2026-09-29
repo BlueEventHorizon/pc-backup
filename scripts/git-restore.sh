@@ -129,7 +129,7 @@ pc_restore_one_git_mirror() {
 }
 
 pc_restore_repo_info() {
-  local info="$1" mode="$2" destination origin head branch source
+  local info="$1" mode="$2" destination origin head branch source current_head current_branch need_checkout
   {
     IFS= read -r destination || true
     IFS= read -r origin || true
@@ -153,8 +153,33 @@ pc_restore_repo_info() {
       pc_restore_fail "Git clone failed: ${origin} -> ${destination}"
       return 0
     fi
-    if [[ -n "${head}" && "$(git -C "${destination}" rev-parse HEAD 2>/dev/null || true)" != "${head}" ]]; then
-      pc_warn "restored HEAD differs from recorded HEAD: ${destination}"
+    # The clone is the remote's current default branch. Return to the branch
+    # and commit recorded at backup time, which is where the saved local
+    # changes were made.
+    if [[ -n "${head}" ]]; then
+      current_head=$(git -C "${destination}" rev-parse HEAD 2>/dev/null || true)
+      current_branch=$(git -C "${destination}" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+      need_checkout=0
+      [[ "${current_head}" == "${head}" ]] || need_checkout=1
+      [[ -z "${branch}" || "${branch}" == "DETACHED" || "${current_branch}" == "${branch}" ]] || need_checkout=1
+      if [[ ${need_checkout} -eq 1 ]]; then
+        if [[ -n "${branch}" && "${branch}" != "DETACHED" ]]; then
+          if ! git -C "${destination}" checkout -q -B "${branch}" "${head}"; then
+            pc_restore_fail "recorded branch/HEAD is not available in the remote: ${destination} (${branch} ${head})"
+            return 0
+          fi
+          git -C "${destination}" branch -q --set-upstream-to="origin/${branch}" "${branch}" >/dev/null 2>&1 || true
+        elif ! git -C "${destination}" checkout -q "${head}"; then
+          pc_restore_fail "recorded HEAD is not available in the remote: ${destination} (${head})"
+          return 0
+        fi
+      fi
+    fi
+    # Local changes saved by backup.sh (patches and untracked files).
+    if ! pc_restore_git_state "${destination}" \
+      "${PC_BACKUP_ROOT}/.pc-backup/git-state/$(pc_visible_storage_rel "${destination}")"; then
+      pc_restore_fail "Git local changes could not be restored (repository itself was restored): ${destination}"
+      return 0
     fi
   else
     [[ -n "${source}" ]] || { pc_warn "Git full source missing in repository info: ${info}"; return 0; }
