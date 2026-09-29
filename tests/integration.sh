@@ -105,8 +105,25 @@ if bash -c 'source "$1"; PC_BACKUP_ROOT="$2"; pc_validate_source_destination_sep
   fail "source/destination overlap was accepted"
 fi
 
-PC_BACKUP_DRY_RUN=1 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh"
+# make check validates and lists targets without comparing or writing.
+check_output="${TEST_ROOT}/check.log"
+PC_BACKUP_CHECK_ONLY=1 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" >"${check_output}"
+[[ ! -e "${TEST_BACKUP_ROOT}/.pc-backup" ]] || fail "check wrote backup metadata"
+grep -q '/Documents -> Documents$' "${check_output}" \
+  || fail "check did not list regular file targets"
+grep -q 'example.txt' "${check_output}" && fail "check unexpectedly listed file differences"
+
+# make dry-run compares with the (still empty) destination without writing.
+dry_run_output="${TEST_ROOT}/dry-run-initial.log"
+PC_BACKUP_DRY_RUN=1 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" >"${dry_run_output}"
 [[ ! -e "${TEST_BACKUP_ROOT}/.pc-backup" ]] || fail "dry-run wrote backup metadata"
+[[ ! -e "${TEST_BACKUP_ROOT}/Documents" ]] || fail "dry-run copied regular files"
+grep -q '>f+++++++++ example.txt' "${dry_run_output}" \
+  || fail "dry-run did not show a new regular file"
+grep -q 'would create Git mirror: .*/dev/project -> ' "${dry_run_output}" \
+  || fail "dry-run did not show a new Git mirror"
+grep -q 'Git full rsync: .*full-project' "${dry_run_output}" \
+  || fail "dry-run did not show a new git-full copy"
 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh"
 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/verify-backup.sh"
 
@@ -151,6 +168,24 @@ git -C "${mirror}" fsck --full >/dev/null
 git -C "${TEST_BACKUP_ROOT}/dev/worktree-main/.git" fsck --full >/dev/null
 git -C "${TEST_BACKUP_ROOT}/dev/worktree-linked/.git" fsck --full >/dev/null
 
+# make check must not read Git mirrors in the destination (they can block on
+# OneDrive-style storage). An unreadable mirror must not change its result.
+chmod 000 "${mirror}"
+check_output="${TEST_ROOT}/check-unreadable.log"
+check_rc=0
+PC_BACKUP_CHECK_ONLY=1 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" >"${check_output}" 2>&1 || check_rc=$?
+chmod 755 "${mirror}"
+[[ ${check_rc} -eq 0 ]] || fail "check failed while a destination mirror was unreadable"
+grep -q 'non-bare' "${check_output}" && fail "check inspected a destination Git mirror"
+
+# Right after a backup, targets without changes are not shown by dry-run.
+dry_run_output="${TEST_ROOT}/dry-run-current.log"
+PC_BACKUP_DRY_RUN=1 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" >"${dry_run_output}"
+grep -q 'rsync: ' "${dry_run_output}" && fail "dry-run showed unchanged regular files"
+grep -q 'Git mirror: ' "${dry_run_output}" && fail "dry-run showed unchanged Git mirrors"
+grep -q 'Git full rsync: ' "${dry_run_output}" && fail "dry-run showed an unchanged git-full copy"
+grep -q 'Git URL inventory' "${dry_run_output}" && fail "dry-run showed unchanged URL-only metadata"
+
 # Simulate stale derived metadata left by an interrupted/background maintenance
 # run. The next backup must rebuild it from this mirror's reachable commits.
 git -C "${TEST_HOME}/dev/worktree-main" commit-graph write --reachable
@@ -167,6 +202,28 @@ printf 'second local change\n' >> "${TEST_HOME}/dev/project/tracked.txt"
 printf 'second untracked\n' > "${TEST_HOME}/dev/project/untracked-second.txt"
 rm "${TEST_HOME}/Documents/deleted-after-first.txt"
 rm "${TEST_HOME}/dev/full-container/full-project/deleted-after-first.txt"
+
+# dry-run shows exactly the pending changes and leaves the backup untouched.
+dry_run_output="${TEST_ROOT}/dry-run-changed.log"
+manifest_before=$(cksum < "${TEST_BACKUP_ROOT}/.pc-backup/manifests/manifest-latest.json")
+refs_before=$(git -C "${mirror}" for-each-ref | cksum)
+PC_BACKUP_DRY_RUN=1 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" >"${dry_run_output}"
+grep -qF '/Documents -> Documents (1 change(s))' "${dry_run_output}" \
+  || fail "dry-run did not summarize regular file changes"
+grep -q '\*deleting *deleted-after-first.txt' "${dry_run_output}" \
+  || fail "dry-run did not show a regular file deletion"
+grep -q 'update refs/heads/main' "${dry_run_output}" \
+  || fail "dry-run did not show an updated Git ref"
+grep -q 'deleting *deleted-after-first.txt' <(grep -A20 'Git full rsync' "${dry_run_output}") \
+  || fail "dry-run did not show a git-full deletion"
+grep -q 'worktree-main' "${dry_run_output}" && fail "dry-run showed an unchanged repository"
+[[ "$(cksum < "${TEST_BACKUP_ROOT}/.pc-backup/manifests/manifest-latest.json")" == "${manifest_before}" ]] \
+  || fail "dry-run updated the manifest"
+[[ "$(git -C "${mirror}" for-each-ref | cksum)" == "${refs_before}" ]] \
+  || fail "dry-run updated Git mirror refs"
+[[ -e "${TEST_BACKUP_ROOT}/Documents/deleted-after-first.txt" ]] \
+  || fail "dry-run deleted a regular file from the backup"
+
 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh"
 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/verify-backup.sh"
 snapshot_count=$(git -C "${mirror}" for-each-ref --count=1 refs/backup-snapshots | wc -l | tr -d ' ')
@@ -181,8 +238,19 @@ snapshot_count=$(git -C "${mirror}" for-each-ref --count=1 refs/backup-snapshots
 mv "${TEST_HOME}" "${TEST_ROOT}/source-home"
 mkdir -p "${TEST_HOME}"
 cp -R "${tool_bundle}" "${TEST_ROOT}/restored-tool"
+restore_output="${TEST_ROOT}/restore.log"
 env -u PC_BACKUP_CONFIG PC_BACKUP_PYTHON="${TEST_PYTHON}" HOME="${TEST_HOME}" \
-  "${TEST_ROOT}/restored-tool/scripts/restore.sh" --yes --all
+  "${TEST_ROOT}/restored-tool/scripts/restore.sh" --yes --all | tee "${restore_output}"
+
+# Secrets are restored before files, and files before Git, so that git-url
+# clones can use the restored SSH keys.
+secrets_line=$(grep -n 'Decrypting secrets archive' "${restore_output}" | head -1 | cut -d: -f1)
+files_line=$(grep -n 'rsync restore: ' "${restore_output}" | head -1 | cut -d: -f1)
+git_line=$(grep -n 'Git restore: \|Git URL restore: ' "${restore_output}" | head -1 | cut -d: -f1)
+[[ -n "${secrets_line}" && -n "${files_line}" && -n "${git_line}" ]] \
+  || fail "restore log is missing a secrets, files or Git step"
+[[ "${secrets_line}" -lt "${files_line}" && "${files_line}" -lt "${git_line}" ]] \
+  || fail "restore order is not secrets, files, Git"
 
 [[ "$(cat "${TEST_HOME}/Documents/example.txt")" == "document data" ]] \
   || fail "regular file restore differs"
@@ -212,6 +280,30 @@ git -C "${TEST_HOME}/dev/unborn-project" rev-parse --verify --quiet HEAD >/dev/n
   || fail "Git branch was not restored"
 [[ "$(cat "${TEST_HOME}/dev/url-project/README.md")" == "remote-backed" ]] \
   || fail "URL-only repository was not restored"
+
+# A failing git clone (here: the remote of the URL-only repository is gone)
+# must not stop the remaining repositories. The restore lists the failure and
+# exits non-zero; repositories restored before and after it are intact.
+mv "${TEST_HOME}" "${TEST_ROOT}/restored-home"
+mkdir -p "${TEST_HOME}"
+mv "${TEST_ROOT}/url-project-remote.git" "${TEST_ROOT}/url-project-remote.git.away"
+partial_output="${TEST_ROOT}/restore-partial.log"
+if env -u PC_BACKUP_CONFIG PC_BACKUP_PYTHON="${TEST_PYTHON}" HOME="${TEST_HOME}" \
+  "${TEST_ROOT}/restored-tool/scripts/restore.sh" --yes --all >"${partial_output}" 2>&1; then
+  fail "restore succeeded although a Git clone failed"
+fi
+grep -q 'ERROR: Git clone failed: .*url-project' "${partial_output}" \
+  || fail "failed Git clone was not reported"
+grep -q '  failed: Git clone failed: .*url-project' "${partial_output}" \
+  || fail "restore did not list the failed item at the end"
+[[ "$(git -C "${TEST_HOME}/dev/project" branch --show-current)" == "main" ]] \
+  || fail "repository restored before the failed clone is missing"
+[[ "$(cat "${TEST_HOME}/dev/full-container/full-project/ignored-local.txt")" == "full ignored local data" ]] \
+  || fail "git-full repository after the failed clone was not restored"
+[[ ! -e "${TEST_HOME}/dev/url-project" ]] || fail "failed clone left a directory behind"
+rm -rf -- "${TEST_HOME}"
+mv "${TEST_ROOT}/restored-home" "${TEST_HOME}"
+mv "${TEST_ROOT}/url-project-remote.git.away" "${TEST_ROOT}/url-project-remote.git"
 
 # Copies left at mirror destinations after switching from git-full to
 # git-mirror must not receive mirror refs. Without confirmation the backup

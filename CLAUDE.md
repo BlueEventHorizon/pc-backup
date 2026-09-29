@@ -13,13 +13,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 make                  # ヘルプ表示（状態変更なし）
 make setup            # Python/PyYAMLの準備
-make check            # 依存関係の確認のみ
+make check            # 依存関係の確認 + PC_BACKUP_CHECK_ONLY=1でbackup.sh（設定・保存先・対象の確認、書き込みなし）
 make init             # バックアップ先の初期化（destination.id設定時、初回のみ）
-make dry-run          # PC_BACKUP_DRY_RUN=1でbackup.shを実行（書き込みなし）
+make dry-run          # PC_BACKUP_DRY_RUN=1でbackup.sh（保存先との差分だけ表示、書き込みなし）
 make backup           # caffeinate -i ./scripts/backup.sh
 make verify           # ./scripts/verify-backup.sh
 make run              # backup → verify（backup失敗時はverifyを実行しない）
-make first-backup     # setup → init → dry-run → backup → verify
+make first-backup     # setup → init → check → backup → verify
 make restore-dry-run  # ./scripts/restore.sh --dry-run --all
 make restore          # ./scripts/restore.sh --all（実行前に確認あり）
 make test             # ./tests/integration.sh
@@ -105,7 +105,7 @@ skip（完全一致） > full（完全一致 or 親ディレクトリ配下） >
 
 ### 安全機構（変更時に壊さないよう注意）
 
-- **排他制御**: `.pc-backup/locks/backup.lock/`を`mkdir`で原子的に作成し、二重起動を防止（Dry Runではロックしない）。
+- **排他制御**: `.pc-backup/locks/backup.lock/`を`mkdir`で原子的に作成し、二重起動を防止（checkとDry Runではロックしない）。
 - **保存先識別子**: `destination.id`設定時、`init-backup-destination.sh`が`.pc-backup-destination`を作成。以後全操作でYAMLの値と一致するか検証し、不一致なら停止（外付けディスク未接続時の誤書き込み防止）。
 - **保存元/保存先の重複防止**: シンボリックリンク解決後の物理パスで、`files.mirror`/`git.roots`/`secrets.paths`のいずれかが保存先と重なる場合は開始前に停止。
 - **アトミックな更新**: Gitミラー初回作成、暗号化アーカイブのlatest、マニフェストのlatestはいずれも一時パスへ書いてから`mv`。
@@ -113,7 +113,7 @@ skip（完全一致） > full（完全一致 or 親ディレクトリ配下） >
 
 ### 復元
 
-`restore.sh`は`--all`/`--files`/`--git`/`--secrets`/`--no-secrets`/`--brew`/`--dry-run`/`--yes`を受け付ける。既存の復元先があるGitリポジトリは上書きせずスキップする。新しいMacでは`.pc-backup/tool/`をローカルへコピーし、同梱の`backup.yaml`で実行する（`backup.sh`の`pc_backup_tool_bundle`が毎回更新）。
+`restore.sh`は`--all`/`--files`/`--git`/`--secrets`/`--no-secrets`/`--brew`/`--dry-run`/`--yes`を受け付ける。復元順は機密情報 → 通常ファイル → Gitで固定（`git-url`のcloneにSSH鍵などが要るため。順序を変えないこと）。Gitはリポジトリ単位の失敗（clone等）を`pc_restore_fail`で記録して続行し、最後に一覧表示して終了コード1で終わる（`pc_die`で全体を止めない）。既存の復元先があるGitリポジトリは上書きせずスキップする。新しいMacでは`.pc-backup/tool/`をローカルへコピーし、同梱の`backup.yaml`で実行する（`backup.sh`の`pc_backup_tool_bundle`が毎回更新）。
 
 ### テスト
 

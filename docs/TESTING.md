@@ -137,8 +137,8 @@ home/.secret-data/token.txt
 ### 6.2 初回バックアップ
 
 1. `init-backup-destination.sh`を実行する。
-2. `PC_BACKUP_DRY_RUN=1`で`backup.sh`を実行する。
-3. Dry Run後に`.pc-backup/`が作られていないことを確認する。
+2. `PC_BACKUP_CHECK_ONLY=1`で`backup.sh`を実行し、`.pc-backup/`が作られず、対象（`/Documents -> Documents`）が表示され、ファイル単位の差分（`example.txt`）が表示されないことを確認する。
+3. `PC_BACKUP_DRY_RUN=1`で`backup.sh`を実行し、`.pc-backup/`と`Documents/`が作られず、新規ファイル（`>f+++++++++ example.txt`）、新規Gitミラー（`would create Git mirror: .../dev/project`）、`git-full`の新規コピーが表示されることを確認する。
 4. 本番モードで`backup.sh`を実行する。
 5. `verify-backup.sh`を実行する。
 
@@ -157,27 +157,37 @@ home/.secret-data/token.txt
 - `.secret-data/encrypted-backup.tar.gpg`がある。
 - Gitミラーが`git fsck --full`に成功する。
 - `.pc-backup/tool/`に`Makefile`、`requirements.txt`、`scripts/`一式があり、`backup.yaml`がテスト用YAMLと同一で、`.venv`、`.git`、`tests`を含まない。
+- 直後に`PC_BACKUP_DRY_RUN=1`で実行すると、差分のない通常ファイル（`rsync: `）、Gitミラー、`git-full`、URL-onlyが表示されない。
+- 保存先のGitミラーを`chmod 000`にしても、`PC_BACKUP_CHECK_ONLY=1`の実行が成功し、非bare確認のログが出ない（checkは保存先のミラーを読まない）。
 
 ### 6.4 更新バックアップ
 
 1. 通常Gitリポジトリの変更をcommitする。
 2. 新しいunstaged変更と未追跡ファイルを作る。
-3. `backup.sh`を再実行する。
-4. `verify-backup.sh`を再実行する。
-5. `refs/backup-snapshots/`に更新前refがあることを確認する。
-6. 元から削除した通常ファイルと`git-full`ファイルがミラーから削除されていることを確認する。
+3. `PC_BACKUP_DRY_RUN=1`で`backup.sh`を実行し、次を確認する。
+   - `Documents`が`(1 change(s))`で、`*deleting deleted-after-first.txt`が表示される。
+   - `update refs/heads/main`が表示される。
+   - `git-full`の`deleted-after-first.txt`の削除が表示される。
+   - 変更のない`worktree-main`が表示されない。
+   - `manifest-latest.json`、ミラーのrefs、削除予定のファイルが変更されていない。
+4. `backup.sh`を再実行する。
+5. `verify-backup.sh`を再実行する。
+6. `refs/backup-snapshots/`に更新前refがあることを確認する。
+7. 元から削除した通常ファイルと`git-full`ファイルがミラーから削除されていることを確認する。
 
 ### 6.5 完全復元
 
 1. 元の`home/`を`source-home/`へ移動する。
 2. 新しい空の`home/`を作る。
 3. 新しいMacを模擬し、`.pc-backup/tool/`を一時ディレクトリへコピーして、`PC_BACKUP_CONFIG`を外した状態でコピー側の`restore.sh --yes --all`を実行する（同梱の`backup.yaml`が使われる）。
-4. 通常文書の内容を比較する。
-5. Gitのbranch、tracked内容、unstaged差分、未追跡ファイルを検査する。
-6. Git内の個別コピーファイルを検査する。
-7. URL-onlyリポジトリの内容を検査する。
-8. `full`対象のgitignoreファイルを検査する。
-9. 復号した`token.txt`の内容を比較する。
+4. 復元ログで、機密情報の復号、通常ファイルの復元、Gitの復元の順に実行されていることを確認する。
+5. 通常文書の内容を比較する。
+6. Gitのbranch、tracked内容、unstaged差分、未追跡ファイルを検査する。
+7. Git内の個別コピーファイルを検査する。
+8. URL-onlyリポジトリの内容を検査する。
+9. `full`対象のgitignoreファイルを検査する。
+10. 復号した`token.txt`の内容を比較する。
+11. URL-onlyリポジトリのリモートを移動して復元をやり直し、`git clone`の失敗が`ERROR:`と末尾の失敗一覧に出て終了コードが0以外になり、前後のリポジトリ（`dev/project`、`full-project`）は復元され、失敗したリポジトリのディレクトリが残らないことを確認する。確認後に元の状態へ戻す。
 
 ### 6.6 非bare保存先の拒否と置き換え
 
@@ -217,10 +227,10 @@ home/.secret-data/token.txt
 
 ## 9. 本番確認手順
 
-### 9.1 Dry Run
+### 9.1 事前確認とDry Run
 
 ```bash
-make dry-run
+make check
 ```
 
 次を目視確認する。
@@ -230,6 +240,15 @@ make dry-run
 - Gitリポジトリ数
 - `git-mirror`、`git-url`、`git-full`、`skip`の判定
 - Gitリポジトリが親ディレクトリの通常コピーから除外されること
+
+2回目以降は、本番前に保存先との差分を確認する。
+
+```bash
+make dry-run
+```
+
+- 表示された新規・更新・削除（`*deleting`）ファイルとGit refの更新が、意図した変更だけであること
+- 差分のない対象が表示されていないこと
 
 ### 9.2 本番バックアップと検証
 
