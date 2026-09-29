@@ -158,6 +158,7 @@ home/.secret-data/token.txt
 - Gitミラーが`git fsck --full`に成功する。
 - `.pc-backup/tool/`に`Makefile`、`requirements.txt`、`scripts/`一式があり、`backup.yaml`がテスト用YAMLと同一で、`.venv`、`.git`、`tests`を含まない。
 - 直後に`PC_BACKUP_DRY_RUN=1`で実行すると、差分のない通常ファイル（`rsync: `）、Gitミラー、`git-full`、URL-onlyが表示されない。
+- 保存先のGitミラーを`chmod 000`にしても、`PC_BACKUP_CHECK_ONLY=1`の実行が成功し、非bare確認のログが出ない（checkは保存先のミラーを読まない）。
 
 ### 6.4 更新バックアップ
 
@@ -186,6 +187,7 @@ home/.secret-data/token.txt
 8. URL-onlyリポジトリの内容を検査する。
 9. `full`対象のgitignoreファイルを検査する。
 10. 復号した`token.txt`の内容を比較する。
+11. URL-onlyリポジトリのリモートを移動して復元をやり直し、`git clone`の失敗が`ERROR:`と末尾の失敗一覧に出て終了コードが0以外になり、前後のリポジトリ（`dev/project`、`full-project`）は復元され、失敗したリポジトリのディレクトリが残らないことを確認する。確認後に元の状態へ戻す。
 
 ### 6.6 非bare保存先の拒否と置き換え
 

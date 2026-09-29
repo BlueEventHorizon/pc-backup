@@ -113,7 +113,7 @@ skip（完全一致） > full（完全一致 or 親ディレクトリ配下） >
 
 ### 復元
 
-`restore.sh`は`--all`/`--files`/`--git`/`--secrets`/`--no-secrets`/`--brew`/`--dry-run`/`--yes`を受け付ける。復元順は機密情報 → 通常ファイル → Gitで固定（`git-url`のcloneにSSH鍵などが要るため。順序を変えないこと）。既存の復元先があるGitリポジトリは上書きせずスキップする。新しいMacでは`.pc-backup/tool/`をローカルへコピーし、同梱の`backup.yaml`で実行する（`backup.sh`の`pc_backup_tool_bundle`が毎回更新）。
+`restore.sh`は`--all`/`--files`/`--git`/`--secrets`/`--no-secrets`/`--brew`/`--dry-run`/`--yes`を受け付ける。復元順は機密情報 → 通常ファイル → Gitで固定（`git-url`のcloneにSSH鍵などが要るため。順序を変えないこと）。Gitはリポジトリ単位の失敗（clone等）を`pc_restore_fail`で記録して続行し、最後に一覧表示して終了コード1で終わる（`pc_die`で全体を止めない）。既存の復元先があるGitリポジトリは上書きせずスキップする。新しいMacでは`.pc-backup/tool/`をローカルへコピーし、同梱の`backup.yaml`で実行する（`backup.sh`の`pc_backup_tool_bundle`が毎回更新）。
 
 ### テスト
 

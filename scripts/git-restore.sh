@@ -2,12 +2,21 @@
 
 # Git restore functions. This file is sourced by restore.sh.
 
+# Record a failed restore step and keep going, so that one unreachable remote or
+# broken mirror does not stop the remaining repositories. restore.sh lists the
+# failures at the end and exits non-zero.
+pc_restore_fail() {
+  PC_RESTORE_FAILURES=$((${PC_RESTORE_FAILURES:-0} + 1))
+  PC_RESTORE_FAILED_ITEMS+=("$1")
+  pc_log "ERROR: $1"
+}
+
 pc_restore_git_refs() {
   local mirror="$1" destination="$2" object ref
   while IFS=' ' read -r object ref; do
     [[ -n "${object}" && -n "${ref}" ]] || continue
     case "${ref}" in refs/backup-snapshots/*) continue ;; esac
-    git -C "${destination}" update-ref "${ref}" "${object}"
+    git -C "${destination}" update-ref "${ref}" "${object}" || return 1
   done < <(git -C "${mirror}" for-each-ref --format='%(objectname) %(refname)' refs)
 }
 
@@ -16,15 +25,15 @@ pc_restore_git_state() {
   [[ -d "${state_dir}" ]] || return 0
   if [[ -f "${state_dir}/staged.patch" ]]; then
     pc_log "Restoring staged changes: ${destination}"
-    git -C "${destination}" apply --index "${state_dir}/staged.patch"
+    git -C "${destination}" apply --index "${state_dir}/staged.patch" || return 1
   fi
   if [[ -f "${state_dir}/unstaged.patch" ]]; then
     pc_log "Restoring unstaged changes: ${destination}"
-    git -C "${destination}" apply "${state_dir}/unstaged.patch"
+    git -C "${destination}" apply "${state_dir}/unstaged.patch" || return 1
   fi
   if [[ -f "${state_dir}/untracked.tar.gz" ]]; then
     pc_log "Restoring untracked files: ${destination}"
-    tar -xzf "${state_dir}/untracked.tar.gz" -C "${destination}"
+    tar -xzf "${state_dir}/untracked.tar.gz" -C "${destination}" || return 1
   fi
 }
 
@@ -70,8 +79,14 @@ pc_restore_one_git_mirror() {
   if [[ "${PC_BACKUP_DRY_RUN}" == "1" ]]; then
     return 0
   fi
-  git -C "${mirror}" fsck --full >/dev/null || pc_die "Git mirror verification failed: ${mirror}"
-  mkdir -p "$(dirname -- "${destination}")"
+  if ! git -C "${mirror}" fsck --full >/dev/null; then
+    pc_restore_fail "Git mirror verification failed: ${mirror#${PC_BACKUP_ROOT}/}"
+    return 0
+  fi
+  if ! mkdir -p "$(dirname -- "${destination}")"; then
+    pc_restore_fail "cannot create parent directory: ${destination}"
+    return 0
+  fi
   if [[ -e "${destination}" ]]; then
     if [[ ! -d "${destination}" || -e "${destination}/.git" ]]; then
       pc_warn "Git destination already exists; skipped: ${destination}"
@@ -83,20 +98,33 @@ pc_restore_one_git_mirror() {
     tmp_checkout="${tmp_dir}/repository"
     if ! git clone "${mirror}" "${tmp_checkout}"; then
       rm -rf -- "${tmp_dir}"
-      pc_die "Git clone failed: ${destination}"
+      pc_restore_fail "Git clone failed: ${mirror#${PC_BACKUP_ROOT}/} -> ${destination}"
+      return 0
     fi
-    rsync -a "${tmp_checkout}/" "${destination}/"
+    if ! rsync -a "${tmp_checkout}/" "${destination}/"; then
+      rm -rf -- "${tmp_dir}"
+      pc_restore_fail "Git checkout copy failed: ${destination}"
+      return 0
+    fi
     rm -rf -- "${tmp_dir}"
-  else
-    git clone "${mirror}" "${destination}"
+  elif ! git clone "${mirror}" "${destination}"; then
+    pc_restore_fail "Git clone failed: ${mirror#${PC_BACKUP_ROOT}/} -> ${destination}"
+    return 0
   fi
-  pc_restore_git_refs "${mirror}" "${destination}"
-  if [[ -n "${origin}" ]]; then
-    git -C "${destination}" remote set-url origin "${origin}"
+  if ! pc_restore_git_refs "${mirror}" "${destination}"; then
+    pc_restore_fail "Git refs restore failed: ${destination}"
+    return 0
+  fi
+  if [[ -n "${origin}" ]] && ! git -C "${destination}" remote set-url origin "${origin}"; then
+    pc_restore_fail "Git remote restore failed: ${destination}"
+    return 0
   fi
   if [[ -n "${state_rel}" ]]; then
     state_dir="${PC_BACKUP_ROOT}/${state_rel}"
-    pc_restore_git_state "${destination}" "${state_dir}"
+    if ! pc_restore_git_state "${destination}" "${state_dir}"; then
+      pc_restore_fail "Git local changes could not be restored (repository itself was restored): ${destination}"
+      return 0
+    fi
   fi
 }
 
@@ -116,9 +144,15 @@ pc_restore_repo_info() {
     pc_log "Git URL restore: ${origin} -> ${destination}"
     [[ "${PC_BACKUP_DRY_RUN}" == "1" ]] && return 0
     [[ ! -e "${destination}" ]] || { pc_warn "Git destination already exists; skipped: ${destination}"; return 0; }
-    [[ -n "${origin}" ]] || { pc_warn "repository URL missing: ${info}"; return 0; }
-    mkdir -p "$(dirname -- "${destination}")"
-    git clone "${origin}" "${destination}"
+    [[ -n "${origin}" ]] || { pc_restore_fail "repository URL missing: ${info#${PC_BACKUP_ROOT}/}"; return 0; }
+    if ! mkdir -p "$(dirname -- "${destination}")"; then
+      pc_restore_fail "cannot create parent directory: ${destination}"
+      return 0
+    fi
+    if ! git clone "${origin}" "${destination}"; then
+      pc_restore_fail "Git clone failed: ${origin} -> ${destination}"
+      return 0
+    fi
     if [[ -n "${head}" && "$(git -C "${destination}" rev-parse HEAD 2>/dev/null || true)" != "${head}" ]]; then
       pc_warn "restored HEAD differs from recorded HEAD: ${destination}"
     fi
@@ -127,8 +161,10 @@ pc_restore_repo_info() {
     pc_log "Git full restore: ${source#${PC_BACKUP_ROOT}/} -> ${destination}"
     [[ "${PC_BACKUP_DRY_RUN}" == "1" ]] && return 0
     [[ ! -e "${destination}" ]] || { pc_warn "Git destination already exists; skipped: ${destination}"; return 0; }
-    mkdir -p "${destination}"
-    rsync -a "${source}/" "${destination}/"
+    if ! mkdir -p "${destination}" || ! rsync -a "${source}/" "${destination}/"; then
+      pc_restore_fail "Git full restore failed: ${source#${PC_BACKUP_ROOT}/} -> ${destination}"
+      return 0
+    fi
   fi
 }
 

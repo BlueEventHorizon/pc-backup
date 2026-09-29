@@ -168,6 +168,16 @@ git -C "${mirror}" fsck --full >/dev/null
 git -C "${TEST_BACKUP_ROOT}/dev/worktree-main/.git" fsck --full >/dev/null
 git -C "${TEST_BACKUP_ROOT}/dev/worktree-linked/.git" fsck --full >/dev/null
 
+# make check must not read Git mirrors in the destination (they can block on
+# OneDrive-style storage). An unreadable mirror must not change its result.
+chmod 000 "${mirror}"
+check_output="${TEST_ROOT}/check-unreadable.log"
+check_rc=0
+PC_BACKUP_CHECK_ONLY=1 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" >"${check_output}" 2>&1 || check_rc=$?
+chmod 755 "${mirror}"
+[[ ${check_rc} -eq 0 ]] || fail "check failed while a destination mirror was unreadable"
+grep -q 'non-bare' "${check_output}" && fail "check inspected a destination Git mirror"
+
 # Right after a backup, targets without changes are not shown by dry-run.
 dry_run_output="${TEST_ROOT}/dry-run-current.log"
 PC_BACKUP_DRY_RUN=1 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" >"${dry_run_output}"
@@ -270,6 +280,30 @@ git -C "${TEST_HOME}/dev/unborn-project" rev-parse --verify --quiet HEAD >/dev/n
   || fail "Git branch was not restored"
 [[ "$(cat "${TEST_HOME}/dev/url-project/README.md")" == "remote-backed" ]] \
   || fail "URL-only repository was not restored"
+
+# A failing git clone (here: the remote of the URL-only repository is gone)
+# must not stop the remaining repositories. The restore lists the failure and
+# exits non-zero; repositories restored before and after it are intact.
+mv "${TEST_HOME}" "${TEST_ROOT}/restored-home"
+mkdir -p "${TEST_HOME}"
+mv "${TEST_ROOT}/url-project-remote.git" "${TEST_ROOT}/url-project-remote.git.away"
+partial_output="${TEST_ROOT}/restore-partial.log"
+if env -u PC_BACKUP_CONFIG PC_BACKUP_PYTHON="${TEST_PYTHON}" HOME="${TEST_HOME}" \
+  "${TEST_ROOT}/restored-tool/scripts/restore.sh" --yes --all >"${partial_output}" 2>&1; then
+  fail "restore succeeded although a Git clone failed"
+fi
+grep -q 'ERROR: Git clone failed: .*url-project' "${partial_output}" \
+  || fail "failed Git clone was not reported"
+grep -q '  failed: Git clone failed: .*url-project' "${partial_output}" \
+  || fail "restore did not list the failed item at the end"
+[[ "$(git -C "${TEST_HOME}/dev/project" branch --show-current)" == "main" ]] \
+  || fail "repository restored before the failed clone is missing"
+[[ "$(cat "${TEST_HOME}/dev/full-container/full-project/ignored-local.txt")" == "full ignored local data" ]] \
+  || fail "git-full repository after the failed clone was not restored"
+[[ ! -e "${TEST_HOME}/dev/url-project" ]] || fail "failed clone left a directory behind"
+rm -rf -- "${TEST_HOME}"
+mv "${TEST_ROOT}/restored-home" "${TEST_HOME}"
+mv "${TEST_ROOT}/url-project-remote.git.away" "${TEST_ROOT}/url-project-remote.git"
 
 # Copies left at mirror destinations after switching from git-full to
 # git-mirror must not receive mirror refs. Without confirmation the backup

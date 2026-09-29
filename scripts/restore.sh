@@ -24,6 +24,8 @@ RESTORE_BREW=0
 SELECTION_GIVEN=0
 NO_SECRETS=0
 PC_WARNING_COUNT=0
+PC_RESTORE_FAILURES=0
+PC_RESTORE_FAILED_ITEMS=()
 PC_LOG_FILE=""
 
 usage() {
@@ -187,6 +189,14 @@ main() {
   [[ ${RESTORE_FILES} -eq 0 ]] || pc_restore_files
   [[ ${RESTORE_GIT} -eq 0 ]] || pc_restore_git
   [[ ${RESTORE_BREW} -eq 0 ]] || pc_restore_brew
+  if [[ ${PC_RESTORE_FAILURES} -gt 0 ]]; then
+    pc_log "=== PC restore completed with ${PC_RESTORE_FAILURES} failure(s) (${PC_WARNING_COUNT} warning(s)) ==="
+    for failed_item in "${PC_RESTORE_FAILED_ITEMS[@]}"; do
+      pc_log "  failed: ${failed_item}"
+    done
+    pc_log "Fix the cause and run restore.sh --git again; repositories that already exist are skipped."
+    exit 1
+  fi
   pc_log "=== PC restore complete (${PC_WARNING_COUNT} warning(s)) ==="
   pc_log "Re-authentication may still be required for gh, SSO and MCP sessions."
 }

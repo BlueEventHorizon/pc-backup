@@ -398,12 +398,17 @@ pc_backup_one_git_repo() {
           fi
         fi
       else
-        if [[ -e "${mirror}" || -L "${mirror}" ]] \
-          && [[ "$(git -C "${mirror}" rev-parse --is-bare-repository 2>/dev/null || true)" != "true" ]]; then
-          pc_log "DRY-RUN: would ask to replace non-bare Git destination: ${PC_BACKUP_ROOT}/${rel}"
-          pc_dry_run_diff && PC_DRY_RUN_CHANGED=$((PC_DRY_RUN_CHANGED + 1))
-        elif pc_dry_run_diff; then
-          pc_git_dry_run_mirror_refs "${repo}" "${mirror}" "${storage_rel}"
+        # make check (PC_BACKUP_CHECK_ONLY=1) must not read the destination:
+        # on File Provider storage such as OneDrive, reading a mirror can block
+        # while the file is downloaded. Only the dry-run comparison does that.
+        if pc_dry_run_diff; then
+          if [[ -e "${mirror}" || -L "${mirror}" ]] \
+            && [[ "$(git -C "${mirror}" rev-parse --is-bare-repository 2>/dev/null || true)" != "true" ]]; then
+            pc_log "DRY-RUN: would ask to replace non-bare Git destination: ${PC_BACKUP_ROOT}/${rel}"
+            PC_DRY_RUN_CHANGED=$((PC_DRY_RUN_CHANGED + 1))
+          else
+            pc_git_dry_run_mirror_refs "${repo}" "${mirror}" "${storage_rel}"
+          fi
         fi
         verification="dry-run"
       fi
