@@ -228,8 +228,19 @@ snapshot_count=$(git -C "${mirror}" for-each-ref --count=1 refs/backup-snapshots
 mv "${TEST_HOME}" "${TEST_ROOT}/source-home"
 mkdir -p "${TEST_HOME}"
 cp -R "${tool_bundle}" "${TEST_ROOT}/restored-tool"
+restore_output="${TEST_ROOT}/restore.log"
 env -u PC_BACKUP_CONFIG PC_BACKUP_PYTHON="${TEST_PYTHON}" HOME="${TEST_HOME}" \
-  "${TEST_ROOT}/restored-tool/scripts/restore.sh" --yes --all
+  "${TEST_ROOT}/restored-tool/scripts/restore.sh" --yes --all | tee "${restore_output}"
+
+# Secrets are restored before files, and files before Git, so that git-url
+# clones can use the restored SSH keys.
+secrets_line=$(grep -n 'Decrypting secrets archive' "${restore_output}" | head -1 | cut -d: -f1)
+files_line=$(grep -n 'rsync restore: ' "${restore_output}" | head -1 | cut -d: -f1)
+git_line=$(grep -n 'Git restore: \|Git URL restore: ' "${restore_output}" | head -1 | cut -d: -f1)
+[[ -n "${secrets_line}" && -n "${files_line}" && -n "${git_line}" ]] \
+  || fail "restore log is missing a secrets, files or Git step"
+[[ "${secrets_line}" -lt "${files_line}" && "${files_line}" -lt "${git_line}" ]] \
+  || fail "restore order is not secrets, files, Git"
 
 [[ "$(cat "${TEST_HOME}/Documents/example.txt")" == "document data" ]] \
   || fail "regular file restore differs"

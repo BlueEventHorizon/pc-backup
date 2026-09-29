@@ -466,7 +466,7 @@ make restore
 
 ### 復元コマンド
 
-引数なしの`restore.sh`と`--all`は、通常ファイル、Git、Secretsを対象にする。Homebrewパッケージは自動では復元せず、`--brew`を明示した場合だけ`brew bundle`を実行する。Dry Runでは書き込みも確認プロンプトも行わない。
+引数なしの`restore.sh`と`--all`は、通常ファイル、Git、Secretsを対象にする。復元は常にSecrets → 通常ファイル → Gitの順で行う。`git-url`のリポジトリはリモートから`git clone`するため、先にSSH鍵などの認証情報を戻す必要があるからである。Secretsの復号に失敗した場合は、他の復元を始める前に停止する。Homebrewパッケージは自動では復元せず、`--brew`を明示した場合だけ`brew bundle`を実行する。Dry Runでは書き込みも確認プロンプトも行わない。
 
 全対象のdry-run:
 

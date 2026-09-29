@@ -180,9 +180,12 @@ main() {
   fi
 
   pc_prepare_restore_git_paths
+  # Secrets come first: git-url repositories are cloned from their remote and
+  # need the restored SSH keys and credentials. Git comes after files so that
+  # non-Git files are in place before repositories are restored.
+  [[ ${RESTORE_SECRETS} -eq 0 ]] || pc_restore_secrets
   [[ ${RESTORE_FILES} -eq 0 ]] || pc_restore_files
   [[ ${RESTORE_GIT} -eq 0 ]] || pc_restore_git
-  [[ ${RESTORE_SECRETS} -eq 0 ]] || pc_restore_secrets
   [[ ${RESTORE_BREW} -eq 0 ]] || pc_restore_brew
   pc_log "=== PC restore complete (${PC_WARNING_COUNT} warning(s)) ==="
   pc_log "Re-authentication may still be required for gh, SSO and MCP sessions."

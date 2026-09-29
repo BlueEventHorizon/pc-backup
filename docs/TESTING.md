@@ -179,12 +179,13 @@ home/.secret-data/token.txt
 1. 元の`home/`を`source-home/`へ移動する。
 2. 新しい空の`home/`を作る。
 3. 新しいMacを模擬し、`.pc-backup/tool/`を一時ディレクトリへコピーして、`PC_BACKUP_CONFIG`を外した状態でコピー側の`restore.sh --yes --all`を実行する（同梱の`backup.yaml`が使われる）。
-4. 通常文書の内容を比較する。
-5. Gitのbranch、tracked内容、unstaged差分、未追跡ファイルを検査する。
-6. Git内の個別コピーファイルを検査する。
-7. URL-onlyリポジトリの内容を検査する。
-8. `full`対象のgitignoreファイルを検査する。
-9. 復号した`token.txt`の内容を比較する。
+4. 復元ログで、機密情報の復号、通常ファイルの復元、Gitの復元の順に実行されていることを確認する。
+5. 通常文書の内容を比較する。
+6. Gitのbranch、tracked内容、unstaged差分、未追跡ファイルを検査する。
+7. Git内の個別コピーファイルを検査する。
+8. URL-onlyリポジトリの内容を検査する。
+9. `full`対象のgitignoreファイルを検査する。
+10. 復号した`token.txt`の内容を比較する。
 
 ### 6.6 非bare保存先の拒否と置き換え
 
