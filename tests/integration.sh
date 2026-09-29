@@ -80,6 +80,14 @@ git -C "${TEST_HOME}/dev/url-project" commit -qm "initial remote-backed project"
 git -C "${TEST_HOME}/dev/url-project" branch -M main
 git -C "${TEST_HOME}/dev/url-project" push -qu origin main
 git -C "${TEST_ROOT}/url-project-remote.git" symbolic-ref HEAD refs/heads/main
+# Local changes only (nothing unpushed) must keep this repository git-url: the
+# changes are saved as patches and applied after cloning on restore.
+printf 'notes base\n' > "${TEST_HOME}/dev/url-project/NOTES.md"
+git -C "${TEST_HOME}/dev/url-project" add NOTES.md
+git -C "${TEST_HOME}/dev/url-project" commit -qm "add notes"
+git -C "${TEST_HOME}/dev/url-project" push -q origin main
+printf 'notes local edit\n' >> "${TEST_HOME}/dev/url-project/NOTES.md"
+printf 'url untracked\n' > "${TEST_HOME}/dev/url-project/url-local.txt"
 
 # A full rule may name a parent directory containing repositories.
 mkdir -p "${TEST_HOME}/dev/full-container/full-project"
@@ -226,12 +234,34 @@ grep -q 'worktree-main' "${dry_run_output}" && fail "dry-run showed an unchanged
 
 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh"
 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/verify-backup.sh"
+
+# Mirrors whose refs changed are fetched; unchanged mirrors are not touched at
+# all (verify-backup.sh above still fsck'd every mirror completely).
+manifest_latest="${TEST_BACKUP_ROOT}/.pc-backup/manifests/manifest-latest.json"
+grep 'dev/project"' "${manifest_latest}" | grep -q '"verification":"fetched"' \
+  || fail "mirror with changed refs was not recorded as fetched"
+grep 'dev/worktree-main"' "${manifest_latest}" | grep -q '"verification":"unchanged"' \
+  || fail "mirror with unchanged refs was not recorded as unchanged"
+[[ -z "$(git -C "${TEST_BACKUP_ROOT}/dev/worktree-main/.git" for-each-ref refs/backup-snapshots)" ]] \
+  || fail "unchanged mirror received a snapshot (it must not be touched)"
 snapshot_count=$(git -C "${mirror}" for-each-ref --count=1 refs/backup-snapshots | wc -l | tr -d ' ')
 [[ "${snapshot_count}" -gt 0 ]] || fail "pre-update Git refs were not preserved"
 [[ ! -e "${TEST_BACKUP_ROOT}/Documents/deleted-after-first.txt" ]] \
   || fail "deleted regular file remained in backup"
 [[ ! -e "${TEST_BACKUP_ROOT}/dev/full-container/full-project/deleted-after-first.txt" ]] \
   || fail "deleted git-full file remained in backup"
+
+# The remote moves on after the backup. Restore must return to the recorded
+# commit, where the saved local changes were made, not stay on the new tip.
+url_recorded_head=$(git -C "${TEST_HOME}/dev/url-project" rev-parse HEAD)
+git clone -q "${TEST_ROOT}/url-project-remote.git" "${TEST_ROOT}/url-advance"
+git -C "${TEST_ROOT}/url-advance" config user.name "PC Backup Test"
+git -C "${TEST_ROOT}/url-advance" config user.email "pc-backup@example.invalid"
+git -C "${TEST_ROOT}/url-advance" config commit.gpgsign false
+printf 'newer\n' > "${TEST_ROOT}/url-advance/advance.txt"
+git -C "${TEST_ROOT}/url-advance" add advance.txt
+git -C "${TEST_ROOT}/url-advance" commit -qm "remote moves on"
+git -C "${TEST_ROOT}/url-advance" push -q origin main
 
 # Restore as on a new Mac: copy the tool bundle out of the backup and run it
 # with its bundled backup.yaml instead of this checkout's scripts/config.
@@ -280,6 +310,14 @@ git -C "${TEST_HOME}/dev/unborn-project" rev-parse --verify --quiet HEAD >/dev/n
   || fail "Git branch was not restored"
 [[ "$(cat "${TEST_HOME}/dev/url-project/README.md")" == "remote-backed" ]] \
   || fail "URL-only repository was not restored"
+[[ "$(git -C "${TEST_HOME}/dev/url-project" rev-parse HEAD)" == "${url_recorded_head}" ]] \
+  || fail "URL-only repository was not returned to the recorded commit"
+[[ ! -e "${TEST_HOME}/dev/url-project/advance.txt" ]] \
+  || fail "URL-only repository contains commits newer than the recorded one"
+grep -q 'notes local edit' "${TEST_HOME}/dev/url-project/NOTES.md" \
+  || fail "unstaged change of the URL-only repository was not restored"
+[[ "$(cat "${TEST_HOME}/dev/url-project/url-local.txt")" == "url untracked" ]] \
+  || fail "untracked file of the URL-only repository was not restored"
 
 # A failing git clone (here: the remote of the URL-only repository is gone)
 # must not stop the remaining repositories. The restore lists the failure and
@@ -304,6 +342,35 @@ grep -q '  failed: Git clone failed: .*url-project' "${partial_output}" \
 rm -rf -- "${TEST_HOME}"
 mv "${TEST_ROOT}/restored-home" "${TEST_HOME}"
 mv "${TEST_ROOT}/url-project-remote.git.away" "${TEST_ROOT}/url-project-remote.git"
+
+# A repository switched from git-mirror to git-url leaves its old mirror in the
+# destination, which restore would prefer over the git-url record. It is removed
+# only after confirmation: check and dry-run leave it alone (dry-run reports
+# it), a non-interactive backup keeps it with a warning, and a confirmed backup
+# removes the mirror but keeps the git-url record.
+stale_mirror="${TEST_BACKUP_ROOT}/dev/url-project/.git"
+mkdir -p "$(dirname -- "${stale_mirror}")"
+git clone -q --mirror "${TEST_HOME}/dev/url-project" "${stale_mirror}"
+git -C "${stale_mirror}" config backup.mode git-mirror
+stale_output="${TEST_ROOT}/stale.log"
+PC_BACKUP_CHECK_ONLY=1 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" \
+  </dev/null >"${stale_output}" 2>&1
+grep -q 'stale Git mirror' "${stale_output}" && fail "check inspected a stale Git mirror"
+PC_BACKUP_DRY_RUN=1 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" \
+  </dev/null >"${stale_output}" 2>&1
+grep -q 'would ask to remove stale Git mirror (now git-url): dev/url-project/.git' "${stale_output}" \
+  || fail "dry-run did not report the stale Git mirror"
+[[ -d "${stale_mirror}" ]] || fail "dry-run removed the stale Git mirror"
+HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" </dev/null >"${stale_output}" 2>&1 \
+  || fail "non-interactive backup failed over a stale Git mirror"
+grep -q 'stale Git mirror kept' "${stale_output}" \
+  || fail "non-interactive backup did not warn about the stale Git mirror"
+[[ -d "${stale_mirror}" ]] || fail "unconfirmed stale Git mirror was removed"
+PC_BACKUP_ASSUME_YES=1 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" \
+  </dev/null >"${stale_output}" 2>&1
+[[ ! -e "${stale_mirror}" ]] || fail "confirmed stale Git mirror was not removed"
+[[ -f "${TEST_BACKUP_ROOT}/.pc-backup/git-url/dev/url-project.repo-info" ]] \
+  || fail "git-url record was lost when removing the stale mirror"
 
 # Copies left at mirror destinations after switching from git-full to
 # git-mirror must not receive mirror refs. Without confirmation the backup

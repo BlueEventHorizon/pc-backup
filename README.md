@@ -323,7 +323,9 @@ git:
   dirty_mode: backup # backup | warn | fail
 ```
 
-`git-url`は、リモートURLがあり、作業ツリーがcleanで、未push・ローカル専用ブランチ・stashがない場合だけ使用される。条件を満たさない場合は、安全のため`git-mirror`へ自動昇格する。
+`git-url`は、リモートURLがあり、未push・ローカル専用ブランチ・stashがない場合だけ使用される。条件を満たさない場合は、安全のため`git-mirror`へ自動昇格する。作業ツリーの変更（staged・unstaged・未追跡）は、`dirty_mode: backup`なら差分パッチとして保存されるため、`git-url`のままでよい（復元時に適用する）。`dirty_mode`が`warn`のときは、変更が失われないよう`git-mirror`へ昇格する。
+
+以前`git-mirror`で保存したリポジトリが`git-url`に切り替わると、保存先に古いミラー（`<リポジトリ>/.git/`）が残る。復元は`.git`ミラーを先にcloneし、復元先があれば`git-url`をスキップするため、古いミラーが優先されてしまう。そこで`backup.sh`は、`git-url`のリポジトリに古いミラー（`backup.mode=git-mirror`のbareリポジトリ）を見つけると、対話端末で削除を確認する（`y`: このミラー、`a`: 残りすべて、それ以外: 残す）。`PC_BACKUP_ASSUME_YES=1`なら確認しない。非対話実行では削除せず警告する。削除するとミラーだけが持つ過去の状態（`refs/backup-snapshots/`）も失われる。`make dry-run`は削除予定を`would ask to remove stale Git mirror`と表示する。`make check`は保存先を読まないため確認しない。
 
 `full`に親ディレクトリを指定すると、その配下で検出したすべてのGitリポジトリに`git-full`を適用する。個別リポジトリを`skip`に入れた場合は、親の`full`より`skip`を優先する。
 
@@ -350,7 +352,7 @@ git:
 - `lfs_mode: local`: ローカルLFS objectsをミラーへコピーする
 - `lfs_mode: warn`: ローカルLFS objectsがあれば警告し、コピーしない
 - `lfs_mode: skip`: ローカルLFS objectsの確認とコピーを行わない
-- `verify: true`: 各`git-mirror`保存直後に`git fsck --full`を実行する
+- `verify: true`: 新しく作る`git-mirror`を、ローカルディスク上で`git fsck --full`してから保存先へ置く。保存先のミラーを読み戻さないため、OneDriveでも遅くならない。既存ミラーの更新では`fsck`を行わない（`fetch`がパックの整合性と接続性を検査する）。保存済みミラー全体の検査は`make verify`で行う
 
 ### 機密情報と保持期間
 
@@ -381,7 +383,7 @@ secrets:
 |---|---|---|
 | 通常ファイル（`files.mirror`） | `rsync -a`で変更されたファイルだけを転送 | サイズと更新時刻を基準に比較する。通常ファイルの世代バックアップは作成しない |
 | `git-full` | `rsync -a`で変更されたファイルだけを転送 | 作業ツリー、`.git`、gitignore対象を含むディレクトリ全体が対象。既定では削除も反映する |
-| `git-mirror` | `git fetch`で新しいGitオブジェクトとrefsを取得 | 更新前のheads・tags・stashは`refs/backup-snapshots/`へ保存する |
+| `git-mirror` | 元リポジトリのrefsがミラーと違うときだけ`git fetch`で新しいGitオブジェクトとrefsを取得。同じなら何も書かない | 更新前のheads・tags・stashは`refs/backup-snapshots/`へ保存する（更新があるときだけ）。マニフェストの`verification`は、新規`ok`、更新`fetched`、変更なし`unchanged` |
 | 機密情報（`secrets.paths`） | tarアーカイブ全体を毎回作り直す | 暗号化有効時はGPG暗号化し、最新版に加えて日付付き世代を保存する |
 | Brewfile | `backup.brew: true`の場合に毎回生成または更新 | `brew`がなければ警告してスキップする |
 | マニフェスト | Dry Run以外で毎回生成または更新 | バックアップ内容と実行結果を記録する |
@@ -496,7 +498,7 @@ Gitの復元で一部のリポジトリが失敗しても（`git clone`の認証
 
 既存の復元先に`.git`があるGitリポジトリは上書きせずスキップする。ただし、`files.mirror`で明示したファイルの復元などによって復元先ディレクトリが先に作られていても、`.git`がなければ一時cloneの内容をそのディレクトリへ統合し、既存の追加ファイルを残す。`git-full`と`git-url`は復元先パスが既に存在すればスキップする。
 
-`git-url`は保存されたリモートURLから復元時点の内容をcloneする方式であり、記録したHEADを必ず復元できる方式ではない。clone後のHEADが記録値と異なる場合は警告する。linked worktreeはそれぞれ独立した通常のGitリポジトリとして復元され、元のworktree共有関係は再構築しない。
+`git-url`は保存されたリモートURLからcloneしたあと、バックアップ時に記録したbranchとHEADへ切り替え、`git-state/`に保存した差分（staged・unstaged・未追跡ファイル）を適用する。記録したHEADがリモートに存在しない場合（リモートの履歴の書き換えなど）は、復元失敗として記録する。linked worktreeはそれぞれ独立した通常のGitリポジトリとして復元され、元のworktree共有関係は再構築しない。
 
 Dry Run以外の復元では、選択した処理全体に対して実行前に1回確認が表示される。確認を省略する場合だけ`--yes`を指定する。
 

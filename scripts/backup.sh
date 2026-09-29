@@ -29,6 +29,7 @@ PC_WARNING_COUNT=0
 PC_DRY_RUN_CHANGED=0
 PC_LOCK_DIR=""
 PC_WORK_DIR=""
+PC_LOCAL_WORK_DIR=""
 PC_LOG_FILE=""
 
 cleanup() {
@@ -36,6 +37,9 @@ cleanup() {
   pc_release_lock
   if [[ -n "${PC_WORK_DIR:-}" && -d "${PC_WORK_DIR}" ]]; then
     rm -rf -- "${PC_WORK_DIR}"
+  fi
+  if [[ -n "${PC_LOCAL_WORK_DIR:-}" && -d "${PC_LOCAL_WORK_DIR}" ]]; then
+    rm -rf -- "${PC_LOCAL_WORK_DIR}"
   fi
   exit "${rc}"
 }
@@ -283,7 +287,7 @@ pc_write_manifest() {
 # Keep this tool and the active configuration inside the backup so that a new
 # Mac can restore without a separate checkout of this project or backup.yaml.
 pc_backup_tool_bundle() {
-  local bundle="${PC_BACKUP_ROOT}/.pc-backup/tool" project_real root_real tmp previous item
+  local bundle="${PC_BACKUP_ROOT}/.pc-backup/tool" project_real root_real tmp previous item local_tool
   local items=(Makefile README.md requirements.txt scripts)
   project_real=$(pc_absolute_path "${PROJECT_ROOT}" 2>/dev/null || printf '%s' "${PROJECT_ROOT}")
   root_real=$(pc_absolute_path "${PC_BACKUP_ROOT}" 2>/dev/null || printf '%s' "${PC_BACKUP_ROOT%/}")
@@ -296,23 +300,38 @@ pc_backup_tool_bundle() {
     return 0
   fi
 
-  tmp=$(mktemp -d "${PC_BACKUP_ROOT}/.pc-backup/.tool.XXXXXX")
-  previous="${tmp}.previous"
+  # Build the bundle on local disk; replace the one in the destination only
+  # when its content differs, so cloud storage does not re-sync it every run.
+  local_tool=$(mktemp -d "${PC_LOCAL_WORK_DIR}/tool.XXXXXX")
   for item in "${items[@]}"; do
     [[ -e "${PROJECT_ROOT}/${item}" ]] || continue
-    if ! rsync -a --exclude=__pycache__ --exclude=.DS_Store "${PROJECT_ROOT}/${item}" "${tmp}/"; then
-      rm -rf -- "${tmp}"
+    if ! rsync -a --exclude=__pycache__ --exclude=.DS_Store "${PROJECT_ROOT}/${item}" "${local_tool}/"; then
+      rm -rf -- "${local_tool}"
       pc_warn "failed to copy tool bundle item: ${item}"
       PC_BACKUP_FAILURES=$((PC_BACKUP_FAILURES + 1))
       return 0
     fi
   done
-  if ! cp -- "${PC_BACKUP_ACTIVE_CONFIG}" "${tmp}/backup.yaml" || ! chmod 600 "${tmp}/backup.yaml"; then
-    rm -rf -- "${tmp}"
+  if ! cp -- "${PC_BACKUP_ACTIVE_CONFIG}" "${local_tool}/backup.yaml" || ! chmod 600 "${local_tool}/backup.yaml"; then
+    rm -rf -- "${local_tool}"
     pc_warn "failed to copy configuration into tool bundle: ${PC_BACKUP_ACTIVE_CONFIG}"
     PC_BACKUP_FAILURES=$((PC_BACKUP_FAILURES + 1))
     return 0
   fi
+  if [[ -d "${bundle}" ]] && diff -rq "${local_tool}" "${bundle}" >/dev/null 2>&1; then
+    rm -rf -- "${local_tool}"
+    pc_log "Tool bundle unchanged: .pc-backup/tool"
+    return 0
+  fi
+  tmp=$(mktemp -d "${PC_BACKUP_ROOT}/.pc-backup/.tool.XXXXXX")
+  previous="${tmp}.previous"
+  if ! rsync -a "${local_tool}/" "${tmp}/"; then
+    rm -rf -- "${tmp}" "${local_tool}"
+    pc_warn "failed to copy tool bundle: ${bundle}"
+    PC_BACKUP_FAILURES=$((PC_BACKUP_FAILURES + 1))
+    return 0
+  fi
+  rm -rf -- "${local_tool}"
   if [[ -e "${bundle}" ]] && ! mv -- "${bundle}" "${previous}"; then
     rm -rf -- "${tmp}"
     pc_warn "failed to replace tool bundle: ${bundle}"
@@ -361,6 +380,8 @@ main() {
     PC_LOG_FILE="${PC_BACKUP_ROOT}/.pc-backup/logs/${PC_BACKUP_TIMESTAMP}.log"
     PC_WORK_DIR=$(mktemp -d "${PC_BACKUP_ROOT}/.pc-backup/.work.XXXXXX")
   fi
+  # New Git mirrors are built and checked here (local disk), not in the destination.
+  PC_LOCAL_WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/pc-backup-local.XXXXXX")
   PC_MANIFEST_REPOS_FILE="${PC_WORK_DIR}/repositories.jsonl"
   PC_MANIFEST_FILES_FILE="${PC_WORK_DIR}/files.jsonl"
   : > "${PC_MANIFEST_REPOS_FILE}"
