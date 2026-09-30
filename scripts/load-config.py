@@ -145,6 +145,9 @@ def main() -> int:
             git.get("exclude_names", ["node_modules", ".venv", "DerivedData", ".build", "build", "dist", ".cache"]),
             "git.exclude_names",
         )
+        for name in exclude_names:
+            if not name or "/" in name:
+                raise ConfigError(f"git.exclude_names entries must be non-empty names without '/': {name!r}")
         git_default_mode = choice(
             git.get("default_mode"), "git.default_mode", "git-mirror", {"git-mirror", "git-url", "git-full", "skip"}
         )

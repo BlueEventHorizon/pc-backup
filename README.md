@@ -323,7 +323,7 @@ git:
   dirty_mode: backup # backup | warn | fail
 ```
 
-`git-url`は、リモートURLがあり、未push・ローカル専用ブランチ・stashがない場合だけ使用される。条件を満たさない場合は、安全のため`git-mirror`へ自動昇格する。作業ツリーの変更（staged・unstaged・未追跡）は、`dirty_mode: backup`なら差分パッチとして保存されるため、`git-url`のままでよい（復元時に適用する）。`dirty_mode`が`warn`のときは、変更が失われないよう`git-mirror`へ昇格する。
+`git-url`は、リモートURLがあり、未push・ローカル専用ブランチ・stashがない場合だけ使用される。条件を満たさない場合は、安全のため`git-mirror`へ自動昇格し、警告ログに理由（`no-remote`、`unpushed-commits(N)`、`branches-without-upstream(N)`、`stash(N)`など）を表示する。作業ツリーの変更（staged・unstaged・未追跡）は、`dirty_mode: backup`なら差分パッチとして保存されるため、`git-url`のままでよい（復元時に適用する）。`dirty_mode`が`warn`のときは、変更が失われないよう`git-mirror`へ昇格する。
 
 以前`git-mirror`で保存したリポジトリが`git-url`に切り替わると、保存先に古いミラー（`<リポジトリ>/.git/`）が残る。復元は`.git`ミラーを先にcloneし、復元先があれば`git-url`をスキップするため、古いミラーが優先されてしまう。そこで`backup.sh`は、`git-url`のリポジトリに古いミラー（`backup.mode=git-mirror`のbareリポジトリ）を見つけると、対話端末で削除を確認する（`y`: このミラー、`a`: 残りすべて、それ以外: 残す）。`PC_BACKUP_ASSUME_YES=1`なら確認しない。非対話実行では削除せず警告する。削除するとミラーだけが持つ過去の状態（`refs/backup-snapshots/`）も失われる。`make dry-run`は削除予定を`would ask to remove stale Git mirror`と表示する。`make check`は保存先を読まないため確認しない。
 
@@ -348,7 +348,7 @@ git:
 
 そのほかのGit設定は次のとおり。
 
-- `exclude_names`: Git探索時にpruneするディレクトリ名。`git-full`のコピー内容を除外する設定ではない
+- `exclude_names`: 除外する名前（任意の深さのファイル/ディレクトリ名。`*`や`?`も可、`/`は不可）。1つのリストが、(1) Git探索時にpruneするディレクトリ名、(2) `files.mirror`の通常コピーの除外（`rsync --exclude`）の2か所に効く。`node_modules`、`.dart_tool`、`local_pub_cache`など、再生成できる依存キャッシュを入れると、小さなファイルが大量にあるディレクトリをクラウドストレージへコピーせずに済み、速く安定する。`git-full`のコピー内容は除外しない。すでに保存先にあるコピーは削除されないので、不要なら手動で削除する。名前は任意の深さで一致するため、除外したくない同名のディレクトリ（例: 文書を置いた`build`）がある場合はリストから外す
 - `lfs_mode: local`: ローカルLFS objectsをミラーへコピーする
 - `lfs_mode: warn`: ローカルLFS objectsがあれば警告し、コピーしない
 - `lfs_mode: skip`: ローカルLFS objectsの確認とコピーを行わない

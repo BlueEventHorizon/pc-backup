@@ -90,7 +90,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 
 ### Gitバックアップのモード判定
 
-`git.roots`配下を`find`で探索してリポジトリを検出し（`exclude_names`でprune）、各リポジトリのモードを次の優先順位で決定する（`pc_git_mode_for_repo`, `scripts/git-backup.sh`）。
+`git.roots`配下を`find`で探索してリポジトリを検出し（`git.exclude_names`でprune。同じリストが`files.mirror`のrsync除外にも効く）、各リポジトリのモードを次の優先順位で決定する（`pc_git_mode_for_repo`, `scripts/git-backup.sh`）。
 
 ```
 skip（完全一致） > full（完全一致 or 親ディレクトリ配下） > url_only（完全一致） > default_mode
