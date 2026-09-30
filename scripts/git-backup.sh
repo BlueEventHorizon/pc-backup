@@ -263,6 +263,17 @@ pc_git_place_archive() {
   fi
 }
 
+# A clean repository whose recorded state is already "clean" needs no rewrite.
+# Dirty repositories are always rewritten so patch and untracked content stay
+# current.
+pc_git_state_is_current() {
+  local state_dir="$1"
+  [[ "${PC_GIT_STAGED}" == "false" && "${PC_GIT_UNSTAGED}" == "false" && "${PC_GIT_UNTRACKED_COUNT}" -eq 0 ]] || return 1
+  [[ -f "${state_dir}/status.json" ]] || return 1
+  [[ ! -e "${state_dir}/staged.patch" && ! -e "${state_dir}/unstaged.patch" && ! -e "${state_dir}/untracked.tar.gz" ]] || return 1
+  grep -q "\"staged\":false,\"unstaged\":false,\"untracked_count\":0,\"stash_count\":${PC_GIT_STASH_COUNT}," "${state_dir}/status.json"
+}
+
 pc_git_write_manifest_entry() {
   local repo="$1" storage_rel="$2" mode="$3" origin="$4" head="$5" branch="$6" verification="$7"
   {

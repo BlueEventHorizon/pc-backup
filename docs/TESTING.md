@@ -130,6 +130,8 @@ home/.secret-data/token.txt
 
 ### 6.1 事前検査
 
+0. `scripts/`と`scripts/lib/`で呼び出している`pc_*`関数がすべて定義されていることを静的に確認する（`bash -n`では検出できず、未定義の関数の呼び出しは`command not found`を出すだけで処理が続くため、気付きにくい）。
+
 1. `tests/invalid.yaml`をローダーへ渡し、拒否されることを確認する。
 2. `setup-dependencies.sh --check`を実行する。
 3. 保存元と保存先が同一または親子関係の設定を拒否することを確認する。
@@ -160,6 +162,7 @@ home/.secret-data/token.txt
 - `.git.tar`を展開したGitミラーが`git fsck --full`に成功する。
 - `.pc-backup/tool/`に`Makefile`、`requirements.txt`、`scripts/`一式があり、`backup.yaml`がテスト用YAMLと同一で、`.venv`、`.git`、`tests`を含まない。
 - 直後に`PC_BACKUP_DRY_RUN=1`で実行すると、差分のない通常ファイル（`rsync: `）、Gitミラー、`git-full`、URL-onlyが表示されない。
+- 内容が変わらない2回目のバックアップで、cleanなリポジトリ（`dev/worktree-main`）の`.pc-backup/git-state/<repo>/status.json`のチェックサムが変わらない（タイムスタンプを含むため、書き直すと変わる）。
 - 保存先の`.git.tar`を`chmod 000`にしても、`PC_BACKUP_CHECK_ONLY=1`の実行が成功し、非bare確認のログが出ない（checkは保存先のミラーを読まない）。
 
 ### 6.4 更新バックアップ
