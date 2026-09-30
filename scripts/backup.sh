@@ -81,8 +81,17 @@ pc_rsync_item() {
     done
   fi
 
-  local opts=(-a --human-readable --itemize-changes)
+  local opts=(-a --human-readable --itemize-changes) exclude_name
   [[ "${PC_BACKUP_RSYNC_DELETE}" == "1" && "${is_dir}" == "1" ]] && opts+=(--delete)
+  # git.exclude_names: dependency caches and build output that can be
+  # regenerated (node_modules, .dart_tool, ...). The same list prunes Git
+  # discovery. Names match at any depth. Already copied files are kept in the
+  # destination (no --delete-excluded). git-full copies are not affected.
+  if [[ "${is_dir}" == "1" ]]; then
+    for exclude_name in "${PC_BACKUP_EXCLUDE_NAMES[@]}"; do
+      opts+=("--exclude=${exclude_name}")
+    done
+  fi
   for exclude_rel in "${git_excludes[@]}"; do
     opts+=("--exclude=/${exclude_rel}/")
   done
@@ -119,8 +128,19 @@ pc_rsync_item() {
     [[ -s "${change_file}" ]] || rm -f "${change_file}"
   fi
 
-  if [[ ${rc} -ne 0 ]]; then
+  if [[ ${rc} -eq 24 ]]; then
+    # 24: source files vanished during the transfer (build outputs, caches).
+    # Everything else was copied, so this is not a backup failure.
+    pc_warn "rsync exit 24 (files vanished during transfer): ${source}"
+    pc_record_file_manifest "${source}" "${storage_rel}" "mirror" "ok"
+  elif [[ ${rc} -ne 0 ]]; then
     pc_warn "rsync exit ${rc}: ${source}"
+    # rsync's error lines are written to the change record only; show them so
+    # the cause (permission, name not allowed on the destination, ...) is visible.
+    if [[ -n "${change_file:-}" && -f "${change_file}" ]]; then
+      grep -E '^(rsync|IO error|file has vanished|WARNING)' "${change_file}" | head -20 | sed 's/^/    /' || true
+      pc_log "Full rsync output: ${change_file#${PC_BACKUP_ROOT}/}"
+    fi
     PC_BACKUP_FAILURES=$((PC_BACKUP_FAILURES + 1))
     pc_record_file_manifest "${source}" "${storage_rel}" "mirror" "failed"
   else

@@ -172,7 +172,7 @@ schedule:
 | `git.url_only` | path list | `[]` | `git-url`を指定する完全一致パス |
 | `git.full` | path list | `[]` | `git-full`にするリポジトリまたは親ディレクトリ |
 | `git.skip` | path list | `[]` | 保存しない完全一致パス |
-| `git.exclude_names` | string list | 上記例 | Git探索時にpruneするディレクトリ名 |
+| `git.exclude_names` | string list | 上記例 | 除外する名前（任意の深さ。`/`を含む名前は不可）。Git探索時のpruneと、`files.mirror`のディレクトリ同期の`rsync --exclude`の両方に使う。`git-full`のコピーと、保存先の既存コピー（`--delete-excluded`を使わない）には影響しない |
 | `git.dirty_mode` | enum | `backup` | `backup` / `warn` / `fail` |
 | `git.lfs_mode` | enum | `local` | `local` / `warn` / `skip` |
 | `git.verify` | boolean | `true` | 新規ミラーをローカルで`git fsck --full`してから保存先へ置く。既存ミラーの更新では実行しない |
@@ -195,8 +195,12 @@ PyYAMLの`safe_load`を使用し、未知のキー、型、enum、時刻範囲�
 - ディレクトリは中身を対応する保存先ディレクトリへ同期する。
 - `rsync_delete: true`（既定）では、ディレクトリ内の削除も保存先へ反映する。
 - `rsync_delete: false`では、保存先にだけ残るファイルを削除しない。
+- `git.exclude_names`の名前は、ディレクトリ同期の`--exclude`として渡す（Git探索のpruneと同じリスト）。再生成できる依存キャッシュを除き、小さなファイルが大量にあるディレクトリをクラウドストレージへ置かないためである。元が削除された大量ファイルの保存先コピーは、`--delete`が保存先のディレクトリ一覧を読む必要があり、OneDriveではタイムアウト（`Operation timed out`）して`rsync`が終了コード23になることがある。その場合`rsync`は削除を見送る（`IO error encountered -- skipping file deletion`）ので、保存先の該当ディレクトリを手動で削除する。
 - この設定は`git-full`にも適用する。
 - 存在しない指定パスは警告としてマニフェストに記録する。
+- `rsync`が終了コード0以外で終わった場合は次のとおり扱う。
+  - 24（転送中に元ファイルが消えた）: 警告のみで、失敗にはしない。残りは転送されている。
+  - それ以外（23: 一部のファイルを転送できなかった、等）: 失敗として数え、マニフェストの`status`を`failed`にする。原因が分かるよう、`rsync`の`rsync:`/`rsync error:`などのエラー行（最大20行）と、全出力のパス（`.pc-backup/changes/`配下）をログに出す。
 - 上位で指定したシンボリックリンクがディレクトリを指す場合、保存名はYAMLの論理パスを保ち、リンク先の内容をコピーする。内部のシンボリックリンクは`rsync -a`によりリンクとして保存する。
 
 ### 7.1 Git探索ルートとの重複
@@ -300,7 +304,7 @@ URLのみの保存は、次の全条件を満たす場合だけ許可する。
 - upstreamのないローカルブランチがない。
 - stashがない。
 
-条件を満たさない場合は、データ喪失を避けるため自動的に`git-mirror`へ昇格する。
+条件を満たさない場合は、データ喪失を避けるため自動的に`git-mirror`へ昇格する。昇格するときは、理由（`no-remote`、`local-changes`、`unpushed-commits(N)`、`branches-without-upstream(N)`、`stash(N)`）を警告ログに含める。
 
 ### 8.5 未コミット状態
 

@@ -13,6 +13,9 @@ files:
 git:
   roots:
     - ${TEST_HOME}/dev
+  exclude_names:
+    - node_modules
+    - "*.cache"
   default_mode: git-mirror
   url_only:
     - ${TEST_HOME}/dev/url-project

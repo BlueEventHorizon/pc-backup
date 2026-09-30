@@ -146,6 +146,7 @@ home/.secret-data/token.txt
 
 - `Documents/example.txt`がコピーされている。
 - `dev/notes.txt`がコピーされている。
+- `git.exclude_names`（`node_modules`、`*.cache`）に一致する`Documents/app/node_modules/`と`dev/tool.cache/`がコピーされず、同じ場所の`Documents/app/main.txt`はコピーされている。
 - `dev/project/tracked.txt`が通常コピーされていない。
 - `dev/project/.git/`にbare Gitミラーがある。
 - `.pc-backup/git-state/dev/project/unstaged.patch`がある。
@@ -203,6 +204,14 @@ home/.secret-data/token.txt
 5. `PC_BACKUP_ASSUME_YES=1`で`backup.sh`を実行し、ミラーが削除され、`.pc-backup/git-url/dev/url-project.repo-info`が残っていることを確認する。
 
 対話端末での`y`/`a`入力は自動テストの対象外である。
+
+### 6.5.2 rsync失敗の報告
+
+1. `Documents/unreadable.txt`を作り、`chmod 000`にして`backup.sh`を実行する。
+2. 終了コードが0以外で、ログに`WARN: rsync exit 23`、`unreadable.txt`の`Permission denied`、`Full rsync output: .pc-backup/changes/`が出力されることを確認する。
+3. ファイルを削除して元に戻す。
+
+終了コード24（元ファイルが転送中に消えた）を警告のみとする処理は、再現が難しいため自動テストの対象外である。
 
 ### 6.6 非bare保存先の拒否と置き換え
 

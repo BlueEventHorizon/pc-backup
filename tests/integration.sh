@@ -48,6 +48,11 @@ printf 'untracked\n' > "${TEST_HOME}/dev/project/untracked.txt"
 printf 'local config\n' > "${TEST_HOME}/dev/project/local-config.yaml"
 printf 'local-config.yaml\n' >> "${TEST_HOME}/dev/project/.git/info/exclude"
 printf 'non-git document\n' > "${TEST_HOME}/dev/notes.txt"
+# git.exclude_names: regenerable directories are not copied (any depth).
+mkdir -p "${TEST_HOME}/Documents/app/node_modules/pkg" "${TEST_HOME}/dev/tool.cache"
+printf 'dependency\n' > "${TEST_HOME}/Documents/app/node_modules/pkg/index.js"
+printf 'cached\n' > "${TEST_HOME}/dev/tool.cache/data.bin"
+printf 'kept\n' > "${TEST_HOME}/Documents/app/main.txt"
 
 # Linked worktrees share the main repository's object store. Each backup
 # mirror must remain independently readable when several of them are updated
@@ -144,6 +149,12 @@ state="${TEST_BACKUP_ROOT}/.pc-backup/git-state/dev/project"
   || fail "regular file was not copied"
 [[ -f "${TEST_BACKUP_ROOT}/dev/notes.txt" ]] \
   || fail "non-Git file below overlapping files/git roots was not copied"
+[[ -f "${TEST_BACKUP_ROOT}/Documents/app/main.txt" ]] \
+  || fail "file next to an excluded directory was not copied"
+[[ ! -e "${TEST_BACKUP_ROOT}/Documents/app/node_modules" ]] \
+  || fail "git.exclude_names did not exclude node_modules"
+[[ ! -e "${TEST_BACKUP_ROOT}/dev/tool.cache" ]] \
+  || fail "git.exclude_names pattern did not exclude *.cache"
 [[ ! -f "${TEST_BACKUP_ROOT}/dev/project/tracked.txt" ]] \
   || fail "Git checkout was copied by the overlapping regular mirror"
 [[ -f "${TEST_BACKUP_ROOT}/dev/project/local-config.yaml" ]] \
@@ -371,6 +382,23 @@ PC_BACKUP_ASSUME_YES=1 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" \
 [[ ! -e "${stale_mirror}" ]] || fail "confirmed stale Git mirror was not removed"
 [[ -f "${TEST_BACKUP_ROOT}/.pc-backup/git-url/dev/url-project.repo-info" ]] \
   || fail "git-url record was lost when removing the stale mirror"
+
+# An rsync failure (exit 23: a file that cannot be read) is a backup failure,
+# and its cause is shown in the log instead of only in the change record.
+printf 'secret\n' > "${TEST_HOME}/Documents/unreadable.txt"
+chmod 000 "${TEST_HOME}/Documents/unreadable.txt"
+rsync_fail_output="${TEST_ROOT}/rsync-fail.log"
+rsync_fail_rc=0
+HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" </dev/null >"${rsync_fail_output}" 2>&1 || rsync_fail_rc=$?
+chmod 644 "${TEST_HOME}/Documents/unreadable.txt"
+rm -f "${TEST_HOME}/Documents/unreadable.txt"
+[[ ${rsync_fail_rc} -ne 0 ]] || fail "backup succeeded although rsync could not read a file"
+grep -q 'WARN: rsync exit 23' "${rsync_fail_output}" || fail "rsync exit code was not reported"
+grep -q 'unreadable.txt.*Permission denied' "${rsync_fail_output}" \
+  || fail "the rsync error cause was not shown in the log"
+grep -q 'Full rsync output: .pc-backup/changes/' "${rsync_fail_output}" \
+  || fail "the path of the full rsync output was not shown"
+rm -f "${TEST_BACKUP_ROOT}/Documents/unreadable.txt"
 
 # Copies left at mirror destinations after switching from git-full to
 # git-mirror must not receive mirror refs. Without confirmation the backup

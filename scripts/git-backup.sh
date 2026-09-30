@@ -292,7 +292,7 @@ Delete it and recreate a Git mirror from ${repo}? Files only in this copy, such 
 
 pc_backup_one_git_repo() {
   local repo="$1" mode rel mirror state_dir origin head branch storage_rel verification="not-run"
-  local tmp_dir tmp_mirror head_ref head_value info_file unsafe=0 is_bare capture_state=0 reject_dirty=0
+  local tmp_dir tmp_mirror head_ref head_value info_file is_bare capture_state=0 reject_dirty=0
 
   mode=$(pc_git_mode_for_repo "${repo}")
   rel=$(pc_visible_storage_rel "${repo}")
@@ -356,16 +356,20 @@ pc_backup_one_git_repo() {
   fi
 
   if [[ "${mode}" == "git-url" ]]; then
-    [[ -n "${origin}" ]] || unsafe=1
+    local unsafe_reasons=""
+    [[ -n "${origin}" ]] || unsafe_reasons="${unsafe_reasons} no-remote"
     # Local changes are safe for git-url only when they are saved as patches
     # (dirty_mode backup); restore clones, checks out the recorded HEAD and
     # applies them. With warn they would be lost, so promote to git-mirror.
     if [[ ${capture_state} -ne 1 ]]; then
-      [[ "${PC_GIT_STAGED}" == "false" && "${PC_GIT_UNSTAGED}" == "false" && "${PC_GIT_UNTRACKED_COUNT}" -eq 0 ]] || unsafe=1
+      [[ "${PC_GIT_STAGED}" == "false" && "${PC_GIT_UNSTAGED}" == "false" && "${PC_GIT_UNTRACKED_COUNT}" -eq 0 ]] \
+        || unsafe_reasons="${unsafe_reasons} local-changes"
     fi
-    [[ "${PC_GIT_AHEAD_COUNT}" -eq 0 && "${PC_GIT_LOCAL_BRANCH_COUNT}" -eq 0 && "${PC_GIT_STASH_COUNT}" -eq 0 ]] || unsafe=1
-    if [[ ${unsafe} -eq 1 ]]; then
-      pc_warn "git-url is unsafe; promoted to git-mirror: ${repo}"
+    [[ "${PC_GIT_AHEAD_COUNT}" -eq 0 ]] || unsafe_reasons="${unsafe_reasons} unpushed-commits(${PC_GIT_AHEAD_COUNT})"
+    [[ "${PC_GIT_LOCAL_BRANCH_COUNT}" -eq 0 ]] || unsafe_reasons="${unsafe_reasons} branches-without-upstream(${PC_GIT_LOCAL_BRANCH_COUNT})"
+    [[ "${PC_GIT_STASH_COUNT}" -eq 0 ]] || unsafe_reasons="${unsafe_reasons} stash(${PC_GIT_STASH_COUNT})"
+    if [[ -n "${unsafe_reasons}" ]]; then
+      pc_warn "git-url is unsafe (${unsafe_reasons# }); promoted to git-mirror: ${repo}"
       mode="git-mirror"
     fi
   fi
