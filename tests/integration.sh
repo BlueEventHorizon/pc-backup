@@ -37,6 +37,14 @@ if "${TEST_PYTHON}" "${PROJECT_ROOT}/scripts/load-config.py" \
 fi
 "${PROJECT_ROOT}/scripts/setup-dependencies.sh" --check >/dev/null
 
+# Every pc_* function that is called must be defined. bash -n cannot catch a
+# missing function, and a call to one often fails silently (only a
+# "command not found" on stderr).
+pc_defined=$(grep -hoE '^pc_[a-z0-9_]+\(\)' "${PROJECT_ROOT}"/scripts/*.sh "${PROJECT_ROOT}"/scripts/lib/*.sh | tr -d '()' | sort -u)
+pc_called=$(grep -hoE '\bpc_[a-z0-9_]+' "${PROJECT_ROOT}"/scripts/*.sh "${PROJECT_ROOT}"/scripts/lib/*.sh | sort -u)
+pc_undefined=$(comm -13 <(printf '%s\n' "${pc_defined}") <(printf '%s\n' "${pc_called}"))
+[[ -z "${pc_undefined}" ]] || fail "undefined function(s) are called: ${pc_undefined}"
+
 mkdir -p "${TEST_HOME}/Documents" "${TEST_HOME}/dev/project" "${TEST_HOME}/.secret-data" "${GNUPGHOME}"
 chmod 700 "${GNUPGHOME}"
 printf 'document data\n' > "${TEST_HOME}/Documents/example.txt"
@@ -165,6 +173,7 @@ state="${TEST_BACKUP_ROOT}/.pc-backup/git-state/dev/project"
   || fail "Git mirror companion files were not created"
 mirror=$(mirror_view dev/project)
 wt_archive_sum_first=$(cksum < "${TEST_BACKUP_ROOT}/dev/worktree-main/.git.tar")
+wt_state_first=$(cksum < "${TEST_BACKUP_ROOT}/.pc-backup/git-state/dev/worktree-main/status.json")
 [[ -f "${state}/unstaged.patch" ]] || fail "unstaged patch was not created"
 [[ -f "${state}/untracked.tar.gz" ]] || fail "untracked archive was not created"
 [[ -f "${TEST_BACKUP_ROOT}/Documents/example.txt" ]] \
@@ -291,6 +300,10 @@ grep 'dev/worktree-main"' "${manifest_latest}" | grep -q '"verification":"unchan
   || fail "unchanged mirror archive was rewritten (it would be uploaded again)"
 [[ "$(sed -n '2p' "${TEST_BACKUP_ROOT}/.pc-backup/git-mirror/dev/worktree-main.info")" == "${TEST_ROOT}/nowhere.git" ]] \
   || fail "changed origin URL was not recorded in the info file"
+# The recorded state of a clean repository is not rewritten (it holds a
+# timestamp, so a rewrite changes the checksum).
+[[ "$(cksum < "${TEST_BACKUP_ROOT}/.pc-backup/git-state/dev/worktree-main/status.json")" == "${wt_state_first}" ]] \
+  || fail "the recorded state of an unchanged clean repository was rewritten"
 
 # gpg output differs on every run, so unchanged secrets are detected by
 # comparing plaintext. An unchanged run leaves the archive and history alone.
