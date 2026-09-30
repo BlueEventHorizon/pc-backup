@@ -148,7 +148,7 @@ home/.secret-data/token.txt
 - `dev/notes.txt`がコピーされている。
 - `git.exclude_names`（`node_modules`、`*.cache`）に一致する`Documents/app/node_modules/`と`dev/tool.cache/`がコピーされず、同じ場所の`Documents/app/main.txt`はコピーされている。
 - `dev/project/tracked.txt`が通常コピーされていない。
-- `dev/project/.git/`にbare Gitミラーがある。
+- `dev/project/.git.tar`（1ファイル）にGitミラーがあり、`dev/project/.git/`ディレクトリは作られていない。補助ファイル`.pc-backup/git-mirror/dev/project.refs`と`.info`がある。
 - `.pc-backup/git-state/dev/project/unstaged.patch`がある。
 - `.pc-backup/git-state/dev/project/untracked.tar.gz`がある。
 - `dev/project/local-config.yaml`が個別コピーされている。
@@ -156,10 +156,11 @@ home/.secret-data/token.txt
 - URL-onlyの`.repo-info`があり、Gitミラーがない。
 - `full-container/full-project/.git/`と`ignored-local.txt`がある。
 - `.secret-data/encrypted-backup.tar.gpg`がある。
-- Gitミラーが`git fsck --full`に成功する。
+- 内容が変わらない2回目のバックアップで、最新版のチェックサムと`secrets-history/`のファイル数が変わらない。保存先に平文の`secrets*.tar`が残っていない。機密ディレクトリにファイルを追加した後のバックアップでは、最新版が変わり、`secrets-history/`が1つ増える。
+- `.git.tar`を展開したGitミラーが`git fsck --full`に成功する。
 - `.pc-backup/tool/`に`Makefile`、`requirements.txt`、`scripts/`一式があり、`backup.yaml`がテスト用YAMLと同一で、`.venv`、`.git`、`tests`を含まない。
 - 直後に`PC_BACKUP_DRY_RUN=1`で実行すると、差分のない通常ファイル（`rsync: `）、Gitミラー、`git-full`、URL-onlyが表示されない。
-- 保存先のGitミラーを`chmod 000`にしても、`PC_BACKUP_CHECK_ONLY=1`の実行が成功し、非bare確認のログが出ない（checkは保存先のミラーを読まない）。
+- 保存先の`.git.tar`を`chmod 000`にしても、`PC_BACKUP_CHECK_ONLY=1`の実行が成功し、非bare確認のログが出ない（checkは保存先のミラーを読まない）。
 
 ### 6.4 更新バックアップ
 
@@ -175,7 +176,7 @@ home/.secret-data/token.txt
 5. `verify-backup.sh`を再実行する。
 6. `refs/backup-snapshots/`に更新前refがあることを確認する。
 7. 元から削除した通常ファイルと`git-full`ファイルがミラーから削除されていることを確認する。
-8. マニフェストで、refsが変わった`dev/project`の`verification`が`fetched`、変わらなかった`dev/worktree-main`が`unchanged`であることを確認する。変わらなかった`dev/worktree-main`のミラーに`refs/backup-snapshots/`が作られていない（触られていない）ことも確認する。
+8. マニフェストで、refsが変わった`dev/project`の`verification`が`fetched`、変わらなかった`dev/worktree-main`が`unchanged`であることを確認する。変わらなかった`dev/worktree-main`の`.git.tar`のチェックサムが変わらず（再アップロードされない）、`refs/backup-snapshots/`も作られていないこと、origin URLだけを変えた場合は`.info`の2行目だけが更新されて`.git.tar`は変わらないことも確認する。
 
 ### 6.5 完全復元
 
@@ -193,15 +194,29 @@ home/.secret-data/token.txt
 10. 復号した`token.txt`の内容を比較する。
 11. URL-onlyリポジトリのリモートを移動して復元をやり直し、`git clone`の失敗が`ERROR:`と末尾の失敗一覧に出て終了コードが0以外になり、前後のリポジトリ（`dev/project`、`full-project`）は復元され、失敗したリポジトリのディレクトリが残らないことを確認する。確認後に元の状態へ戻す。
 
+12. 復元後、`dev/worktree-main`のorigin URLが、補助ファイル`.info`に記録したURLになっていることを確認する（origin URLはtarを作り直さずに`.info`だけを更新するため、復元時に`.info`の値を優先する）。
+
+### 6.5.0 ディレクトリ形式のミラーの復元とDry Run
+
+バックアップ先を複製して、以前のバージョンの保存形式を模擬する。
+
+1. `dev/unborn-project`を、`.git.tar`と補助ファイルを消してディレクトリ形式の`.git/`だけにする。`dev/worktree-linked`は`.git.tar`と`.git/`の両方を持たせる。
+2. 空のHOMEへ`restore.sh --dry-run --git`を実行し、終了コード0で`Git restore: dev/project/.git.tar -> `が出力され、HOMEに何も書き込まれないことを確認する。
+3. `restore.sh --yes --git`を実行し、`dev/unborn-project`の未追跡ファイルが復元され、`dev/worktree-linked`のディレクトリ形式は`Old directory-format Git mirror skipped (archive exists)`で読み飛ばされ、`.git.tar`のリポジトリ（`dev/project`のbranch）が復元されることを確認する。
+
+`.git.tar`内の絶対パスや`..`を拒否する処理（`pc_tar_is_safe`）は、Secretsと共通のヘルパーを使うが、Git用の入力での拒否は自動テストの対象外である。
+
 ### 6.5.1 古いGitミラーの削除
 
 `git-mirror`から`git-url`へ切り替えた後の古いミラーを模擬する。
 
-1. `dev/url-project/.git`に、`backup.mode=git-mirror`を設定したbareミラーを作る。
+1. `dev/url-project/.git`に、`backup.mode=git-mirror`を設定したbareミラー（ディレクトリ形式）を作る。
 2. `PC_BACKUP_CHECK_ONLY=1`で`backup.sh`を実行し、`stale Git mirror`が出力されない（保存先を読まない）ことを確認する。
-3. `PC_BACKUP_DRY_RUN=1`で実行し、`would ask to remove stale Git mirror (now git-url): dev/url-project/.git`が出力され、ミラーが残っていることを確認する。
+3. `PC_BACKUP_DRY_RUN=1`で実行し、`would ask to remove stale Git mirror (git-url): dev/url-project/.git`が出力され、ミラーが残っていることを確認する。
 4. 標準入力を`/dev/null`にした非対話で`backup.sh`を実行し、成功（終了コード0）し、`stale Git mirror kept`の警告が出て、ミラーが残っていることを確認する。
 5. `PC_BACKUP_ASSUME_YES=1`で`backup.sh`を実行し、ミラーが削除され、`.pc-backup/git-url/dev/url-project.repo-info`が残っていることを確認する。
+6. 同様に、`.git.tar`と補助ファイル（`.refs`、`.info`）を置いた場合も、非対話では残り、確認ありでは3つとも削除されることを確認する。
+7. 逆方向: `git-mirror`のリポジトリ（`dev/worktree-main`）に、以前のバージョンのディレクトリ形式のミラー（`.git/`）を置く。非対話では残り警告が出て、確認ありでは`.git/`が削除されて`.git.tar`が残ることを確認する。
 
 対話端末での`y`/`a`入力は自動テストの対象外である。
 
@@ -220,9 +235,9 @@ home/.secret-data/token.txt
 1. `dev/project/`を復元済みリポジトリ（作業ツリーと非bare`.git/`）のコピーで置き換え、古い`.pc-backup/git-full/dev/project.repo-info`を置く。
 2. `dev/worktree-linked/`を、`.git`ファイルだけを持つディレクトリで置き換える（linked worktreeのコピーを模擬）。
 3. 標準入力を`/dev/null`にした非対話で`backup.sh`を実行し、終了コードが0以外であることを確認する。
-4. 出力に`existing Git destination is not a bare repository`が2件含まれ、`dev/project/.git/`のrefsと`.git`ファイルが変更されていないことを確認する。
+4. 出力に`existing Git destination is not a bare repository`が2件含まれ、旧コピー（`dev/project/`の作業ツリーと、`dev/worktree-linked/.git`ファイル）が変更されず、`.git.tar`が作られていないことを確認する。
 5. `PC_BACKUP_ASSUME_YES=1`で`backup.sh`を実行し、`verify-backup.sh`が成功することを確認する。
-6. 両方の保存先がbareミラーになり、旧作業ツリーの`tracked.txt`が消え、個別指定した`local-config.yaml`が残り、古いrepo-infoと`.pc-backup/.git-replace.*`が残っていないことを確認する。
+6. 両方の保存先が`.git.tar`のミラーになり（`.git`は残らない）、旧作業ツリーの`tracked.txt`が消え、個別指定した`local-config.yaml`が残り、古いrepo-infoと`.pc-backup/.git-replace.*`が残っていないことを確認する。
 
 対話端末での`y`/`N`入力は自動テストの対象外である。
 

@@ -201,6 +201,21 @@ pc_collect_secret_socket_excludes() {
   done
 }
 
+# gpg output differs on every run (random salt), so encrypted files cannot be
+# compared. Decrypt the archive already in the destination and compare the
+# plaintext tar with the new one instead.
+pc_secrets_encrypted_unchanged() {
+  local encrypted="$1" bundle="$2" previous="${PC_LOCAL_WORK_DIR}/secrets.previous.tar" unchanged=1
+  [[ -f "${encrypted}" ]] || return 1
+  if printf '%s' "${PC_BACKUP_GPG_PASS}" | gpg --batch --yes --pinentry-mode loopback \
+    --passphrase-fd 0 --output "${previous}" --decrypt "${encrypted}" >/dev/null 2>&1 \
+    && cmp -s "${previous}" "${bundle}"; then
+    unchanged=0
+  fi
+  rm -f -- "${previous}"
+  return ${unchanged}
+}
+
 pc_backup_secrets() {
   local bundle tmp_gpg latest dated plaintext_latest secret_dir history_dir socket
   local tar_opts=()
@@ -209,12 +224,14 @@ pc_backup_secrets() {
 
   pc_log "Secrets: ${#PC_SECRET_ITEMS[@]} path(s)"
   if [[ "${PC_BACKUP_DRY_RUN}" == "1" ]]; then
-    pc_log "DRY-RUN: would create encrypted secrets archive"
+    pc_log "DRY-RUN: would create encrypted secrets archive (skipped when unchanged)"
     return 0
   fi
 
   pc_require_cmd tar
-  bundle="${PC_WORK_DIR}/secrets.tar"
+  # Plaintext secrets stay on local disk. PC_WORK_DIR is inside the destination
+  # and may be synced to the cloud while the archive is being built.
+  bundle="${PC_LOCAL_WORK_DIR}/secrets.tar"
   pc_collect_secret_socket_excludes
   tar_opts=(-cf "${bundle}")
   for socket in "${PC_SECRET_SOCKET_EXCLUDES[@]}"; do
@@ -231,6 +248,7 @@ pc_backup_secrets() {
       --exclude='.gnupg/*.socket' \
       "${PC_SECRET_ITEMS[@]}"
   )
+  chmod 600 "${bundle}"
 
   secret_dir=$(pc_secret_storage_dir)
   history_dir="${PC_BACKUP_ROOT}/.pc-backup/secrets-history"
@@ -243,22 +261,36 @@ pc_backup_secrets() {
     pc_require_cmd gpg
     pc_require_gpg_pass 1 \
       || pc_die "GPG passphrase unavailable; add it to Keychain or run interactively"
-    tmp_gpg="${PC_WORK_DIR}/secrets.tar.gpg"
+    if pc_secrets_encrypted_unchanged "${latest}" "${bundle}"; then
+      # Uploading an identical archive (and a new history copy) on every run
+      # only makes cloud storage sync the same data again.
+      rm -f -- "${bundle}"
+      pc_log "Encrypted secrets unchanged: ${latest#${PC_BACKUP_ROOT}/}"
+      return 0
+    fi
+    tmp_gpg="${PC_LOCAL_WORK_DIR}/secrets.tar.gpg"
     printf '%s' "${PC_BACKUP_GPG_PASS}" | gpg --batch --yes --pinentry-mode loopback \
       --passphrase-fd 0 --symmetric --cipher-algo AES256 \
       --output "${tmp_gpg}" "${bundle}"
+    rm -f -- "${bundle}"
     cp "${tmp_gpg}" "${dated}"
     cp "${tmp_gpg}" "${latest}.tmp"
     mv "${latest}.tmp" "${latest}"
     chmod 600 "${dated}" "${latest}"
-    rm -f "${plaintext_latest}"
+    rm -f -- "${tmp_gpg}" "${plaintext_latest}"
     pc_log "Encrypted secrets: ${latest#${PC_BACKUP_ROOT}/}"
   else
     [[ "${PC_BACKUP_ALLOW_PLAINTEXT_SECRETS}" == "1" ]] \
       || pc_die "plaintext secrets refused; enable encryption"
+    if cmp -s "${bundle}" "${plaintext_latest}" 2>/dev/null; then
+      rm -f -- "${bundle}"
+      pc_log "Plaintext secrets unchanged: ${plaintext_latest#${PC_BACKUP_ROOT}/}"
+      return 0
+    fi
     cp "${bundle}" "${plaintext_latest}.tmp"
     mv "${plaintext_latest}.tmp" "${plaintext_latest}"
     chmod 600 "${plaintext_latest}"
+    rm -f -- "${bundle}"
     pc_warn "secrets stored as plaintext by explicit configuration"
   fi
 }
