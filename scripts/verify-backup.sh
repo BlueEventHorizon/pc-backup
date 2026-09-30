@@ -35,8 +35,23 @@ verify_manifest() {
 }
 
 verify_git_mirrors() {
-  local mirror count=0
+  local mirror count=0 work
   pc_require_cmd git
+  pc_require_cmd tar
+  # <repo>/.git.tar: extract to a temporary directory and check it completely.
+  while IFS= read -r -d '' mirror; do
+    count=$((count + 1))
+    work=$(mktemp -d "${TMPDIR:-/tmp}/pc-backup-verify.XXXXXX")
+    if tar -xf "${mirror}" -C "${work}" 2>/dev/null \
+      && git -C "${work}/mirror" fsck --full >/dev/null 2>&1; then
+      pc_log "Git mirror ok: ${mirror#${PC_BACKUP_ROOT}/}"
+    else
+      pc_warn "Git mirror failed: ${mirror#${PC_BACKUP_ROOT}/}"
+      VERIFY_FAILURES=$((VERIFY_FAILURES + 1))
+    fi
+    rm -rf -- "${work}"
+  done < <(find "${PC_BACKUP_ROOT}" -path "${PC_BACKUP_ROOT}/.pc-backup" -prune -o -type f -name .git.tar -print0)
+  # Directory-format mirrors from earlier versions.
   while IFS= read -r -d '' mirror; do
     [[ "$(git -C "${mirror}" config --get backup.mode 2>/dev/null || true)" == "git-mirror" ]] || continue
     count=$((count + 1))

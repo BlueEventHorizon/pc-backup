@@ -53,6 +53,10 @@ pc_prepare_restore_git_paths() {
   PC_RESTORE_GIT_PATHS=()
 
   while IFS= read -r -d '' mirror; do
+    source=$(dirname -- "${mirror}")
+    pc_restore_git_path_seen "${source}" || PC_RESTORE_GIT_PATHS+=("${source}")
+  done < <(find "${PC_BACKUP_ROOT}" -path "${PC_BACKUP_ROOT}/.pc-backup" -prune -o -type f -name .git.tar -print0)
+  while IFS= read -r -d '' mirror; do
     [[ "$(git -C "${mirror}" config --get backup.mode 2>/dev/null || true)" == "git-mirror" ]] || continue
     source=$(dirname -- "${mirror}")
     pc_restore_git_path_seen "${source}" || PC_RESTORE_GIT_PATHS+=("${source}")
@@ -68,19 +72,20 @@ pc_prepare_restore_git_paths() {
 }
 
 pc_restore_one_git_mirror() {
-  local mirror="$1" destination origin state_rel state_dir tmp_dir tmp_checkout
+  local mirror="$1" label="${2:-}" destination origin state_rel state_dir tmp_dir tmp_checkout
+  [[ -n "${label}" ]] || label="${mirror#${PC_BACKUP_ROOT}/}"
   destination=$(git -C "${mirror}" config --get backup.originalPath 2>/dev/null || true)
   origin=$(git -C "${mirror}" config --get backup.originalOrigin 2>/dev/null || true)
   state_rel=$(git -C "${mirror}" config --get backup.statePath 2>/dev/null || true)
   [[ -n "${destination}" ]] || { pc_warn "Git mirror lacks backup.originalPath: ${mirror}"; return 0; }
   [[ "${destination}" == /* ]] || { pc_warn "unsafe Git restore path: ${destination}"; return 0; }
 
-  pc_log "Git restore: ${mirror#${PC_BACKUP_ROOT}/} -> ${destination}"
+  pc_log "Git restore: ${label} -> ${destination}"
   if [[ "${PC_BACKUP_DRY_RUN}" == "1" ]]; then
     return 0
   fi
   if ! git -C "${mirror}" fsck --full >/dev/null; then
-    pc_restore_fail "Git mirror verification failed: ${mirror#${PC_BACKUP_ROOT}/}"
+    pc_restore_fail "Git mirror verification failed: ${label}"
     return 0
   fi
   if ! mkdir -p "$(dirname -- "${destination}")"; then
@@ -98,7 +103,7 @@ pc_restore_one_git_mirror() {
     tmp_checkout="${tmp_dir}/repository"
     if ! git clone "${mirror}" "${tmp_checkout}"; then
       rm -rf -- "${tmp_dir}"
-      pc_restore_fail "Git clone failed: ${mirror#${PC_BACKUP_ROOT}/} -> ${destination}"
+      pc_restore_fail "Git clone failed: ${label} -> ${destination}"
       return 0
     fi
     if ! rsync -a "${tmp_checkout}/" "${destination}/"; then
@@ -108,7 +113,7 @@ pc_restore_one_git_mirror() {
     fi
     rm -rf -- "${tmp_dir}"
   elif ! git clone "${mirror}" "${destination}"; then
-    pc_restore_fail "Git clone failed: ${mirror#${PC_BACKUP_ROOT}/} -> ${destination}"
+    pc_restore_fail "Git clone failed: ${label} -> ${destination}"
     return 0
   fi
   if ! pc_restore_git_refs "${mirror}" "${destination}"; then
@@ -193,13 +198,57 @@ pc_restore_repo_info() {
   fi
 }
 
+# Restore from <repo>/.git.tar: extract it to a temporary directory and restore
+# from there like from a directory-format mirror. The companion info file holds
+# the current origin URL and HEAD (they can change without rewriting the
+# archive), so it takes precedence over the config stored in the archive.
+pc_restore_one_git_archive() {
+  local archive="$1" rel work mirror info_file repo origin head_ref
+  rel="${archive#${PC_BACKUP_ROOT}/}"
+  rel="${rel%/.git.tar}"
+  info_file="${PC_BACKUP_ROOT}/.pc-backup/git-mirror/${rel}.info"
+  if [[ "${PC_BACKUP_DRY_RUN}" == "1" ]]; then
+    repo=$(sed -n '1p' "${info_file}" 2>/dev/null || true)
+    pc_log "Git restore: ${rel}/.git.tar -> ${repo:-(destination recorded in the archive)}"
+    return 0
+  fi
+  if ! pc_tar_is_safe "${archive}"; then
+    pc_restore_fail "unsafe path found in Git mirror archive: ${rel}/.git.tar"
+    return 0
+  fi
+  work=$(mktemp -d "${TMPDIR:-/tmp}/pc-backup-git-archive.XXXXXX")
+  if ! tar -xf "${archive}" -C "${work}" || [[ ! -d "${work}/mirror" ]]; then
+    rm -rf -- "${work}"
+    pc_restore_fail "Git mirror archive could not be extracted: ${rel}/.git.tar"
+    return 0
+  fi
+  mirror="${work}/mirror"
+  if [[ -f "${info_file}" ]]; then
+    { IFS= read -r repo || true; IFS= read -r origin || true; IFS= read -r head_ref || true; } < "${info_file}"
+    [[ -z "${repo}" ]] || git -C "${mirror}" config backup.originalPath "${repo}"
+    git -C "${mirror}" config backup.originalOrigin "${origin}"
+    [[ -z "${head_ref}" ]] || git -C "${mirror}" symbolic-ref HEAD "${head_ref}"
+  fi
+  pc_restore_one_git_mirror "${mirror}" "${rel}/.git.tar"
+  rm -rf -- "${work}"
+}
+
 pc_restore_git() {
   local mirror info
   pc_require_cmd git
   pc_require_cmd rsync
   pc_prepare_restore_git_paths
   while IFS= read -r -d '' mirror; do
+    pc_restore_one_git_archive "${mirror}"
+  done < <(find "${PC_BACKUP_ROOT}" -path "${PC_BACKUP_ROOT}/.pc-backup" -prune -o -type f -name .git.tar -print0)
+  # Directory-format mirrors from earlier versions. Skip one that has an
+  # archive: the archive is newer.
+  while IFS= read -r -d '' mirror; do
     [[ "$(git -C "${mirror}" config --get backup.mode 2>/dev/null || true)" == "git-mirror" ]] || continue
+    if [[ -f "$(dirname -- "${mirror}")/.git.tar" ]]; then
+      pc_log "Old directory-format Git mirror skipped (archive exists): ${mirror#${PC_BACKUP_ROOT}/}"
+      continue
+    fi
     pc_restore_one_git_mirror "${mirror}"
   done < <(find "${PC_BACKUP_ROOT}" -path "${PC_BACKUP_ROOT}/.pc-backup" -prune -o -type d -name .git -prune -print0)
   if [[ -d "${PC_BACKUP_ROOT}/.pc-backup/git-url" ]]; then

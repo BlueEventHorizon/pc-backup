@@ -39,7 +39,7 @@ HOME外の絶対パスを指定した場合は、`<destination>/_absolute/`以�
 ### 3.2 保存方式はリーフの表現とする
 
 - 通常ディレクトリ: 内容をそのままコピー
-- Gitミラー: 元の位置に相当するディレクトリの`.git/`
+- Gitミラー: 元の位置に相当するディレクトリの`.git.tar`（1ファイル）
 - 機密ディレクトリ: 元の位置に相当するディレクトリの`encrypted-backup.tar.gpg`
 - `git-full`: 元の位置に作業ツリーも含めてコピー
 
@@ -76,7 +76,7 @@ backup.sh
 │   ├── environment/
 │   ├── dev/
 │   │   └── app/
-│   │       └── .git/                 # bare Git mirror
+│   │       └── .git.tar              # bare Git mirrorを1ファイルにまとめたもの
 │   └── secret/
 │       └── encrypted-backup.tar.gpg
 ├── _absolute/                         # HOME外を指定した場合
@@ -233,7 +233,7 @@ ${HOME}/data/dev/example-app/ -> git.default_modeまたは例外モード
 
 | モード | 保存内容 | 保存先 |
 |---|---|---|
-| `git-mirror` | 全Git refsとobjects。作業ツリーなし | `<logical-repo>/.git/` |
+| `git-mirror` | 全Git refsとobjects。作業ツリーなし | `<logical-repo>/.git.tar`（1ファイル） |
 | `git-url` | 元パス、URL、HEAD、branch | `.pc-backup/git-url/` |
 | `git-full` | 作業ツリーと`.git`を`rsync` | `<logical-repo>/` |
 | `skip` | 保存しない | なし |
@@ -242,30 +242,34 @@ ${HOME}/data/dev/example-app/ -> git.default_modeまたは例外モード
 
 ### 8.3 `git-mirror`
 
-初回は次を実行する。
+ミラーは、1リポジトリにつき **1ファイルのtar**（`<logical-repo>/.git.tar`）として保存する。bareリポジトリのディレクトリをそのまま置くと、`objects/`の小さなファイルが数千〜数万個になり、OneDriveなどのクラウドストレージの同期が非常に遅くなるためである。tarの中身は、bareミラー（`mirror/`ディレクトリ）を`tar -cf`でまとめたもので、`COPYFILE_DISABLE=1`で`._*`ファイルは作らない。
 
-```bash
-git clone --mirror --no-hardlinks <source> <temporary-destination>
-```
+作業はすべてローカルディスクの作業ディレクトリ（`PC_LOCAL_WORK_DIR`、`$TMPDIR`配下）で行い、保存先には完成したtarだけを置く。保存先では一時名（`.git.tar.XXXXXX`）へコピーしてから`mv`で`.git.tar`に置き換えるため、書きかけの`.git.tar`が見えることはない。
 
-成功後に一時ディレクトリを最終的な`.git/`へ移動する。
+**新規作成**: 作業ディレクトリへ`git clone --mirror --no-hardlinks <source>`し、`git repack -a -d`で1つのpackにまとめ、`git.verify`が有効なら`git fsck --full`（ローカル）を行う。検査に失敗したものは保存しない。
 
-新規ミラーは、ローカルディスクの作業ディレクトリ（`PC_LOCAL_WORK_DIR`、`$TMPDIR`配下）へ`clone --mirror`し、`git.verify`が有効なら`git fsck --full`とconfig設定をローカルで済ませる。検査に成功したものだけを保存先の一時ディレクトリへ`rsync`し、`mv`で最終的な`.git/`に置く。OneDriveなどのFile Provider配下では、保存先のミラーを読み戻す`fsck`が1リポジトリ数分かかるためである。
+**更新**: 保存先の`.git.tar`を作業ディレクトリへ展開し、更新前refsを`refs/backup-snapshots/<timestamp>/`へ保存してから、ローカルの元リポジトリから`refs/*`をfetchする。commit-graphが壊れていれば作り直す。`fsck`は行わない（fetchがパックの整合性と接続性を検査する。保存済みミラー全体の検査は`verify-backup.sh`）。その後、tarを作り直して保存先へ置く。
 
-2回目以降は、元リポジトリの各refがミラーにない、または別のオブジェクトを指す場合だけ更新する。ミラーにだけあるref（削除済みブランチ、スナップショット）は比較に含めない。
+**変更なしの判定**: 保存先のtarを開かずに、小さな補助ファイルで判定する。
 
-- 更新あり: 更新前refsを`refs/backup-snapshots/<timestamp>/`へ保存し、ローカルの元リポジトリから`refs/*`をfetchする。`fsck`は行わない（fetchがパックの整合性と接続性を検査する。保存済みミラーの全体検査は`verify-backup.sh`）。マニフェストの`verification`は`fetched`。
-- 更新なし: スナップショット、fetch、commit-graph検査、`fsck`を行わない。HEADの指すbranchが変わっていれば`HEAD`だけ更新し、`backup.*`のconfigが古ければ書き直す。マニフェストの`verification`は`unchanged`。
+- `.pc-backup/git-mirror/<repo>.refs`: tarに入っているrefsの`objectname refname`（ソート済み、スナップショットを除く）
+- `.pc-backup/git-mirror/<repo>.info`: 元リポジトリのパス、origin URL、HEADが指すref（各1行）
+
+元リポジトリの各refが`.refs`にない、または別のオブジェクトを指す場合だけ、tarを作り直す。tarにだけあるref（削除済みブランチ、スナップショット）は比較に含めない（fetchは削除しないため）。同じなら、スナップショット、fetch、tarの作り直し、アップロードを行わない（`verification`は`unchanged`）。ブランチの切り替えやorigin URLの変更はrefを変えないため、`.info`だけを更新する（内容が変わったときだけ書く）。補助ファイルはtarの保存後に書くので、途中で中断されても、古い一覧のために再作成されるだけである。
+
+マニフェストの`verification`は、新規`ok`（`verify: false`なら`not-run`）、更新`fetched`、変更なし`unchanged`。
 
 Git状態（`git-state/`）は、作業ツリーがcleanで、記録済みの状態（staged/unstaged/未追跡数/stash数）と同じなら書き直さない。差分や未追跡ファイルがあるリポジトリは、内容が変わっていても検出できるよう毎回書き直す。
 
-既存の`.git`がbareリポジトリでない場合（`git-full`から`git-mirror`へ切り替えた後に残った旧コピー等。linked worktreeのコピーでは`.git`がファイルになる）は、既存ミラーとしてfetchしない。判定は`git rev-parse --is-bare-repository`の出力が`true`であることで行う（非bareの`.git/`でも終了コードは0になるため）。
+以前のバージョンが作った、ディレクトリ形式のミラー（`<repo>/.git/`のbareリポジトリ）は、`.git.tar`を保存した後に、確認のうえで削除する（後述）。復元は`.git.tar`を優先し、同じリポジトリのディレクトリ形式は読み飛ばす。
+
+保存先に`.git`があり、bareリポジトリのディレクトリでない場合（`git-full`から`git-mirror`へ切り替えた後に残った旧コピー等。linked worktreeのコピーでは`.git`がファイルになる）は、旧コピーとして扱う。判定は`git rev-parse --is-bare-repository`の出力が`true`であることで行う（非bareの`.git/`でも終了コードは0になるため）。
 
 元リポジトリは存在するため、ユーザーが確認すれば旧コピーを置き換える。
 
 1. 対話端末で旧コピーの削除とミラー再作成を確認する。`PC_BACKUP_ASSUME_YES=1`なら確認しない。非対話実行または拒否時は旧コピーを変更せず、そのリポジトリを失敗として扱う。
-2. `.pc-backup/.git-replace.*`へ新しいミラーを`clone --mirror`する。失敗時は旧コピーを変更しない。
-3. 旧コピーを同じ一時ディレクトリへ退避し、新しいミラーを`<repo>/.git`へ配置する。
+2. 新しいミラーのtarを作業ディレクトリに作り（失敗時は旧コピーを変更しない）、`.pc-backup/.git-replace.*`へコピーする。
+3. 旧コピーを同じ一時ディレクトリへ退避し、`<repo>/.git.tar`を配置する。
 4. `files.mirror`で個別指定したリポジトリ内のファイルを退避先から戻す。
 5. 古い`.pc-backup/git-full/<repo>.repo-info`と退避先を削除する。
 
@@ -334,6 +338,10 @@ gpg --symmetric --cipher-algo AES256 --pinentry-mode loopback
 ```
 
 最新版は、先頭の`secrets.paths`に対応する保存先ディレクトリの`encrypted-backup.tar.gpg`へ保存する。日付付き世代は`.pc-backup/secrets-history/`へ保存する。
+
+内容が前回と同じときは、最新版も日付付き世代も作らない。GPGの出力は暗号化のたびにsaltが変わり、暗号化後のファイル同士は比較できないため、保存先にある最新版を復号して、今回のtarとバイト単位（`cmp`）で比較する。同じならログに`Encrypted secrets unchanged`と出して終了する。復号に失敗した場合（パスフレーズを変えた、ファイルが壊れているなど）は変更ありとして作り直す。OneDriveなどで同じデータを毎回アップロードしないためである。このため日付付き世代は、内容が変わった回だけ増える（保持日数を過ぎた世代は削除されるが、最新版は残る）。
+
+平文のtar、復号した前回のtarは、保存先ではなくローカルの作業ディレクトリ（`PC_LOCAL_WORK_DIR`、`$TMPDIR`配下、モード0700）にだけ作り、使い終わったら削除する。保存先の作業ディレクトリ（`.pc-backup/.work.*`）はクラウドに同期され得るため、平文の機密情報を置かない。
 
 `~/.ssh/agent`、GnuPG socket等の一時ソケットはtarから除外する。暗号化成功後、平文のtarは作業用一時ディレクトリとともに削除する。
 
@@ -419,7 +427,7 @@ LaunchAgentには対話端末がないため、定期実行ではKeychain登録�
 
 ### 12.4 一時ファイルと更新
 
-- Gitミラー初回作成は一時ディレクトリから`mv`する。
+- Gitミラーの`.git.tar`は、保存先の一時名へコピーしてから`mv`で置き換える。
 - 暗号化アーカイブのlatestは一時名から`mv`する。
 - マニフェストlatestも一時名から`mv`する。
 - 同梱ツール`tool/`も一時ディレクトリに作成してから入れ替える。
@@ -449,7 +457,7 @@ LaunchAgentには対話端末がないため、定期実行ではKeychain登録�
 
 1. 保存先識別子がYAMLと一致すること。
 2. `manifest-latest.json`が存在し、JSONとして解析できること。
-3. `backup.mode=git-mirror`の全`.git/`が`git fsck --full`に成功すること。
+3. 全`.git.tar`を一時ディレクトリへ展開して`git fsck --full`に成功すること（以前のバージョンのディレクトリ形式のミラーも同様に検査する）。
 4. 暗号化アーカイブが復号でき、tar一覧を読めること。
 5. 同梱ツール`.pc-backup/tool/`に`Makefile`、`backup.yaml`、`scripts/restore.sh`、`scripts/load-config.py`があること。この機能より前に作成したバックアップを考慮し、欠落は失敗ではなく警告とする。
 
@@ -474,7 +482,7 @@ LaunchAgentには対話端末がないため、定期実行ではKeychain登録�
 
 ### 15.2 Git
 
-- `git-mirror`: ミラーを`fsck`後に元パスへcloneし、refs、origin URL、staged/unstaged差分、未追跡ファイルを復元する。
+- `git-mirror`: `<repo>/.git.tar`のパスを検査（絶対パスと`..`を拒否）して一時ディレクトリへ展開し、補助ファイル`.pc-backup/git-mirror/<repo>.info`のorigin URLとHEADを反映してから、`fsck`後に元パスへcloneし、refs、origin URL、staged/unstaged差分、未追跡ファイルを復元する。以前のバージョンのディレクトリ形式のミラー（`<repo>/.git/`）も復元できるが、同じリポジトリに`.git.tar`があれば読み飛ばす。
 - `git-url`: 記録済みURLからcloneし、記録したbranchとHEADへ`checkout -B`（detachedなら`checkout <HEAD>`）で切り替え、`git-state/`の差分（staged・unstaged・未追跡ファイル）を適用する。記録したHEADがリモートにない場合や差分の適用に失敗した場合は、復元失敗として記録して続行する。
 - `git-full`: 記録した保存先から元パスへ`rsync`する。
 - 復元先が存在するGitリポジトリは上書きせずスキップする。
@@ -535,7 +543,7 @@ Pythonがあればプロジェクト専用`.venv`を作り、`requirements.txt`�
   - 通常ファイルと`git-full`: 本番と同じ`rsync`オプション（`--delete`、Gitリポジトリ除外を含む）に`--dry-run --itemize-changes`を付けて実行し、`.`で始まる属性のみの変更行と`created directory`行を除いて表示する。保存先の親ディレクトリがまだない場合は空ディレクトリと比較する。
   - `git-mirror`: ミラーがなければ新規作成として表示する。あれば元リポジトリの全refとミラーのrefを比較し、新規または指すオブジェクトが変わるrefを表示する。fetchはミラーだけにあるrefを削除しないため、それらは表示しない。LFSオブジェクトの差分は表示しない。
   - `git-url`: `.pc-backup/git-url/<repo>.repo-info`の内容と、今回記録する値が異なる場合に表示する。
-  - 未コミット変更の保存、機密情報、Brewfile、ツール一式は毎回作り直すため、作成予定として表示する。
+  - 未コミット変更の保存、Brewfile、ツール一式は作成予定として表示する。機密情報は、内容が前回と同じなら本番では作り直されない（Dry Runでは暗号化のパスフレーズを使う比較を行わず、作成予定として表示する）。
   - 最後に、差分のあった通常ファイル・Git対象の件数を表示する。
 
 ## 18. 定期実行

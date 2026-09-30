@@ -93,7 +93,7 @@ ${HOME}/data/dev/app     -> <destination>/data/dev/app/.git
 ${HOME}/data/secret      -> <destination>/data/secret/encrypted-backup.tar.gpg
 ```
 
-Gitの`.git/`はチェックアウトを持たないミラー。ログ、マニフェスト、未コミット差分などの内部情報は`<destination>/.pc-backup/`に保存される。
+Gitのミラーは、チェックアウトを持たないbareリポジトリを`.git.tar`の1ファイルにまとめたもの（`.git/`ディレクトリのまま置くと小さなファイルが数万個になり、OneDriveなどの同期が非常に遅くなるため）。ログ、マニフェスト、未コミット差分などの内部情報は`<destination>/.pc-backup/`に保存される。
 
 `files.mirror`と`git.roots`は重なってもよい。例えば両方に`${HOME}/data/dev`を指定した場合、検出したGitリポジトリのディレクトリは通常のrsyncから自動除外し、Gitモードで保存する。リポジトリ間にある文書や非Gitディレクトリは通常コピーする。
 
@@ -162,7 +162,7 @@ PC_BACKUP_DRY_RUN=1 ./scripts/backup.sh
 | `git-mirror` | 新規作成されるミラー、または新規・更新されるref（`new`/`update`）。ミラーにだけ残るref（更新前スナップショット等）は表示しない |
 | `git-url` | 記録済みのURL・HEAD・branchから変わる場合 |
 | Gitの未コミット変更 | 保存される場合（`would capture Git local changes`） |
-| 機密情報、Brewfile、ツール一式 | 毎回作り直すため、差分にかかわらず作成予定として表示する |
+| 機密情報、Brewfile、ツール一式 | 差分にかかわらず作成予定として表示する（機密情報は、本番で内容が前回と同じなら作り直されない） |
 
 ### 7. 本番バックアップ
 
@@ -325,7 +325,7 @@ git:
 
 `git-url`は、リモートURLがあり、未push・ローカル専用ブランチ・stashがない場合だけ使用される。条件を満たさない場合は、安全のため`git-mirror`へ自動昇格し、警告ログに理由（`no-remote`、`unpushed-commits(N)`、`branches-without-upstream(N)`、`stash(N)`など）を表示する。作業ツリーの変更（staged・unstaged・未追跡）は、`dirty_mode: backup`なら差分パッチとして保存されるため、`git-url`のままでよい（復元時に適用する）。`dirty_mode`が`warn`のときは、変更が失われないよう`git-mirror`へ昇格する。
 
-以前`git-mirror`で保存したリポジトリが`git-url`に切り替わると、保存先に古いミラー（`<リポジトリ>/.git/`）が残る。復元は`.git`ミラーを先にcloneし、復元先があれば`git-url`をスキップするため、古いミラーが優先されてしまう。そこで`backup.sh`は、`git-url`のリポジトリに古いミラー（`backup.mode=git-mirror`のbareリポジトリ）を見つけると、対話端末で削除を確認する（`y`: このミラー、`a`: 残りすべて、それ以外: 残す）。`PC_BACKUP_ASSUME_YES=1`なら確認しない。非対話実行では削除せず警告する。削除するとミラーだけが持つ過去の状態（`refs/backup-snapshots/`）も失われる。`make dry-run`は削除予定を`would ask to remove stale Git mirror`と表示する。`make check`は保存先を読まないため確認しない。
+以前`git-mirror`で保存したリポジトリが`git-url`に切り替わると、保存先に古いミラー（`<リポジトリ>/.git.tar`と補助ファイル、または以前のバージョンのディレクトリ形式`<リポジトリ>/.git/`）が残る。復元はミラーを先にcloneし、復元先があれば`git-url`をスキップするため、古いミラーが優先されてしまう。そこで`backup.sh`は、`git-url`のリポジトリに古いミラー（`backup.mode=git-mirror`のbareリポジトリ、または`.git.tar`）を見つけると、対話端末で削除を確認する（`y`: このミラー、`a`: 残りすべて、それ以外: 残す）。`PC_BACKUP_ASSUME_YES=1`なら確認しない。非対話実行では削除せず警告する。削除するとミラーだけが持つ過去の状態（`refs/backup-snapshots/`）も失われる。`make dry-run`は削除予定を`would ask to remove stale Git mirror`と表示する。`make check`は保存先を読まないため確認しない。
 
 `full`に親ディレクトリを指定すると、その配下で検出したすべてのGitリポジトリに`git-full`を適用する。個別リポジトリを`skip`に入れた場合は、親の`full`より`skip`を優先する。
 
@@ -383,8 +383,8 @@ secrets:
 |---|---|---|
 | 通常ファイル（`files.mirror`） | `rsync -a`で変更されたファイルだけを転送 | サイズと更新時刻を基準に比較する。通常ファイルの世代バックアップは作成しない |
 | `git-full` | `rsync -a`で変更されたファイルだけを転送 | 作業ツリー、`.git`、gitignore対象を含むディレクトリ全体が対象。既定では削除も反映する |
-| `git-mirror` | 元リポジトリのrefsがミラーと違うときだけ`git fetch`で新しいGitオブジェクトとrefsを取得。同じなら何も書かない | 更新前のheads・tags・stashは`refs/backup-snapshots/`へ保存する（更新があるときだけ）。マニフェストの`verification`は、新規`ok`、更新`fetched`、変更なし`unchanged` |
-| 機密情報（`secrets.paths`） | tarアーカイブ全体を毎回作り直す | 暗号化有効時はGPG暗号化し、最新版に加えて日付付き世代を保存する |
+| `git-mirror` | 元リポジトリのrefsが保存済みの一覧（`.pc-backup/git-mirror/<repo>.refs`）と違うときだけ、`.git.tar`を展開して`git fetch`し、tarを作り直して置き換える。同じなら何も書かない（tarを開かず、アップロードもしない） | 更新前のheads・tags・stashは`refs/backup-snapshots/`へ保存する（更新があるときだけ）。マニフェストの`verification`は、新規`ok`、更新`fetched`、変更なし`unchanged` |
+| 機密情報（`secrets.paths`） | tarを作り、保存先の最新版を復号したものとバイト単位で比較する。同じなら何も書かない。違うときだけアーカイブ全体を作り直す | 暗号化有効時はGPG暗号化し、最新版に加えて日付付き世代を保存する。GPGは暗号化のたびに出力が変わるため、暗号化後のファイルではなく平文のtarを比較する。平文のtarはローカルの作業ディレクトリにだけ作り、保存先には置かない |
 | Brewfile | `backup.brew: true`の場合に毎回生成または更新 | `brew`がなければ警告してスキップする |
 | マニフェスト | Dry Run以外で毎回生成または更新 | バックアップ内容と実行結果を記録する |
 
@@ -421,13 +421,14 @@ PC_BACKUP_DRY_RUN=1 ./scripts/backup.sh
 <PC_BACKUP_ROOT>/
 ├── data/                   # $HOME/dataをそのまま再現
 │   ├── docs/              # 通常ファイル
-│   ├── dev/app/.git/      # チェックアウトなしGitミラー
+│   ├── dev/app/.git.tar   # チェックアウトなしGitミラーを1ファイルにまとめたもの
 │   └── secret/
 │       └── encrypted-backup.tar.gpg
 ├── .pc-backup-destination
 └── .pc-backup/             # 管理情報と復元用メタデータ
     ├── manifests/
     ├── git-state/
+    ├── git-mirror/         # .git.tarの補助ファイル（<repo>.refs, <repo>.info）
     ├── git-url/
     ├── git-full/
     ├── secrets-history/
@@ -535,7 +536,7 @@ LaunchAgentログ:
 
 - 通常ファイルのバックアップ・復元
 - 通常ファイルと`git-full`から削除したファイルのミラー削除
-- Gitミラーの初回作成と更新
+- Gitミラーの初回作成と更新（`.git.tar`の作成、変更なしのときは再作成しないこと、補助ファイルの更新）
 - 非bareの既存`.git/`（旧`git-full`コピー等）へのミラー書き込み拒否と、確認後のミラーへの置き換え
 - linked worktreeごとの独立ミラー作成と検証
 - 不整合commit-graphの自動再構築

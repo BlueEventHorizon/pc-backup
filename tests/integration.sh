@@ -21,6 +21,16 @@ fail() {
   exit 1
 }
 
+# Git mirrors are stored as <repo>/.git.tar (one file per repository).
+# mirror_view extracts one into a fresh directory and prints the mirror path.
+mirror_view() {
+  local dir="${TEST_ROOT}/view/$1"
+  rm -rf -- "${dir}"
+  mkdir -p "${dir}"
+  tar -xf "${TEST_BACKUP_ROOT}/$1/.git.tar" -C "${dir}"
+  printf '%s\n' "${dir}/mirror"
+}
+
 if "${TEST_PYTHON}" "${PROJECT_ROOT}/scripts/load-config.py" \
   "${PROJECT_ROOT}/tests/invalid.yaml" >/dev/null 2>&1; then
   fail "invalid YAML configuration was accepted"
@@ -140,9 +150,21 @@ grep -q 'Git full rsync: .*full-project' "${dry_run_output}" \
 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh"
 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/verify-backup.sh"
 
-mirror="${TEST_BACKUP_ROOT}/dev/project/.git"
+secrets_latest="${TEST_BACKUP_ROOT}/.secret-data/encrypted-backup.tar.gpg"
+secrets_history="${TEST_BACKUP_ROOT}/.pc-backup/secrets-history"
+secrets_sum_first=$(cksum < "${secrets_latest}")
+secrets_history_first=$(ls "${secrets_history}" | wc -l | tr -d ' ')
+
+mirror_archive="${TEST_BACKUP_ROOT}/dev/project/.git.tar"
 state="${TEST_BACKUP_ROOT}/.pc-backup/git-state/dev/project"
-[[ -d "${mirror}" ]] || fail "Git mirror was not created"
+[[ -f "${mirror_archive}" ]] || fail "Git mirror archive was not created"
+[[ ! -e "${TEST_BACKUP_ROOT}/dev/project/.git" ]] \
+  || fail "Git mirror was stored as a directory of small files instead of one archive"
+[[ -f "${TEST_BACKUP_ROOT}/.pc-backup/git-mirror/dev/project.refs" \
+  && -f "${TEST_BACKUP_ROOT}/.pc-backup/git-mirror/dev/project.info" ]] \
+  || fail "Git mirror companion files were not created"
+mirror=$(mirror_view dev/project)
+wt_archive_sum_first=$(cksum < "${TEST_BACKUP_ROOT}/dev/worktree-main/.git.tar")
 [[ -f "${state}/unstaged.patch" ]] || fail "unstaged patch was not created"
 [[ -f "${state}/untracked.tar.gz" ]] || fail "untracked archive was not created"
 [[ -f "${TEST_BACKUP_ROOT}/Documents/example.txt" ]] \
@@ -159,17 +181,17 @@ state="${TEST_BACKUP_ROOT}/.pc-backup/git-state/dev/project"
   || fail "Git checkout was copied by the overlapping regular mirror"
 [[ -f "${TEST_BACKUP_ROOT}/dev/project/local-config.yaml" ]] \
   || fail "explicit regular file inside a Git repository was not copied"
-[[ -d "${TEST_BACKUP_ROOT}/dev/unborn-project/.git" ]] \
+[[ -f "${TEST_BACKUP_ROOT}/dev/unborn-project/.git.tar" ]] \
   || fail "unborn Git repository mirror was not created"
 [[ -f "${TEST_BACKUP_ROOT}/.pc-backup/git-state/dev/unborn-project/untracked.tar.gz" ]] \
   || fail "unborn Git repository files were not captured"
-[[ -d "${TEST_BACKUP_ROOT}/dev/worktree-linked/.git" ]] \
+[[ -f "${TEST_BACKUP_ROOT}/dev/worktree-linked/.git.tar" ]] \
   || fail "linked worktree Git mirror was not created"
 [[ -f "${TEST_BACKUP_ROOT}/.secret-data/encrypted-backup.tar.gpg" ]] \
   || fail "encrypted secrets archive was not created"
 [[ -f "${TEST_BACKUP_ROOT}/.pc-backup/git-url/dev/url-project.repo-info" ]] \
   || fail "URL-only repository metadata was not created"
-[[ ! -d "${TEST_BACKUP_ROOT}/dev/url-project/.git" ]] \
+[[ ! -e "${TEST_BACKUP_ROOT}/dev/url-project/.git" && ! -e "${TEST_BACKUP_ROOT}/dev/url-project/.git.tar" ]] \
   || fail "URL-only repository was unexpectedly mirrored"
 [[ -d "${TEST_BACKUP_ROOT}/dev/full-container/full-project/.git" ]] \
   || fail "full repository below configured parent was not copied"
@@ -184,16 +206,16 @@ cmp -s "${PC_BACKUP_CONFIG}" "${tool_bundle}/backup.yaml" \
 [[ ! -e "${tool_bundle}/.venv" && ! -e "${tool_bundle}/.git" && ! -e "${tool_bundle}/tests" ]] \
   || fail "tool bundle contains local-only project files"
 git -C "${mirror}" fsck --full >/dev/null
-git -C "${TEST_BACKUP_ROOT}/dev/worktree-main/.git" fsck --full >/dev/null
-git -C "${TEST_BACKUP_ROOT}/dev/worktree-linked/.git" fsck --full >/dev/null
+git -C "$(mirror_view dev/worktree-main)" fsck --full >/dev/null
+git -C "$(mirror_view dev/worktree-linked)" fsck --full >/dev/null
 
 # make check must not read Git mirrors in the destination (they can block on
 # OneDrive-style storage). An unreadable mirror must not change its result.
-chmod 000 "${mirror}"
+chmod 000 "${mirror_archive}"
 check_output="${TEST_ROOT}/check-unreadable.log"
 check_rc=0
 PC_BACKUP_CHECK_ONLY=1 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" >"${check_output}" 2>&1 || check_rc=$?
-chmod 755 "${mirror}"
+chmod 644 "${mirror_archive}"
 [[ ${check_rc} -eq 0 ]] || fail "check failed while a destination mirror was unreadable"
 grep -q 'non-bare' "${check_output}" && fail "check inspected a destination Git mirror"
 
@@ -208,11 +230,17 @@ grep -q 'Git URL inventory' "${dry_run_output}" && fail "dry-run showed unchange
 # Simulate stale derived metadata left by an interrupted/background maintenance
 # run. The next backup must rebuild it from this mirror's reachable commits.
 git -C "${TEST_HOME}/dev/worktree-main" commit-graph write --reachable
+graph_edit="${TEST_ROOT}/graph-edit"
+rm -rf -- "${graph_edit}"
+mkdir -p "${graph_edit}"
+tar -xf "${mirror_archive}" -C "${graph_edit}"
+mkdir -p "${graph_edit}/mirror/objects/info"
 cp "${TEST_HOME}/dev/worktree-main/.git/objects/info/commit-graph" \
-  "${mirror}/objects/info/commit-graph"
-if git -C "${mirror}" commit-graph verify >/dev/null 2>&1; then
+  "${graph_edit}/mirror/objects/info/commit-graph"
+if git -C "${graph_edit}/mirror" commit-graph verify >/dev/null 2>&1; then
   fail "foreign commit graph was unexpectedly valid"
 fi
+tar -cf "${mirror_archive}" -C "${graph_edit}" mirror
 
 # Exercise an update of an existing mirror and preservation of pre-update refs.
 git -C "${TEST_HOME}/dev/project" add tracked.txt untracked.txt
@@ -225,7 +253,7 @@ rm "${TEST_HOME}/dev/full-container/full-project/deleted-after-first.txt"
 # dry-run shows exactly the pending changes and leaves the backup untouched.
 dry_run_output="${TEST_ROOT}/dry-run-changed.log"
 manifest_before=$(cksum < "${TEST_BACKUP_ROOT}/.pc-backup/manifests/manifest-latest.json")
-refs_before=$(git -C "${mirror}" for-each-ref | cksum)
+archive_before=$(cksum < "${mirror_archive}")
 PC_BACKUP_DRY_RUN=1 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" >"${dry_run_output}"
 grep -qF '/Documents -> Documents (1 change(s))' "${dry_run_output}" \
   || fail "dry-run did not summarize regular file changes"
@@ -238,10 +266,14 @@ grep -q 'deleting *deleted-after-first.txt' <(grep -A20 'Git full rsync' "${dry_
 grep -q 'worktree-main' "${dry_run_output}" && fail "dry-run showed an unchanged repository"
 [[ "$(cksum < "${TEST_BACKUP_ROOT}/.pc-backup/manifests/manifest-latest.json")" == "${manifest_before}" ]] \
   || fail "dry-run updated the manifest"
-[[ "$(git -C "${mirror}" for-each-ref | cksum)" == "${refs_before}" ]] \
-  || fail "dry-run updated Git mirror refs"
+[[ "$(cksum < "${mirror_archive}")" == "${archive_before}" ]] \
+  || fail "dry-run rewrote the Git mirror archive"
 [[ -e "${TEST_BACKUP_ROOT}/Documents/deleted-after-first.txt" ]] \
   || fail "dry-run deleted a regular file from the backup"
+
+# A changed origin URL does not change any ref: only the small info file is
+# updated, the archive is not uploaded again.
+git -C "${TEST_HOME}/dev/worktree-main" remote add origin "${TEST_ROOT}/nowhere.git"
 
 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh"
 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/verify-backup.sh"
@@ -253,9 +285,29 @@ grep 'dev/project"' "${manifest_latest}" | grep -q '"verification":"fetched"' \
   || fail "mirror with changed refs was not recorded as fetched"
 grep 'dev/worktree-main"' "${manifest_latest}" | grep -q '"verification":"unchanged"' \
   || fail "mirror with unchanged refs was not recorded as unchanged"
-[[ -z "$(git -C "${TEST_BACKUP_ROOT}/dev/worktree-main/.git" for-each-ref refs/backup-snapshots)" ]] \
+[[ -z "$(git -C "$(mirror_view dev/worktree-main)" for-each-ref refs/backup-snapshots)" ]] \
   || fail "unchanged mirror received a snapshot (it must not be touched)"
-snapshot_count=$(git -C "${mirror}" for-each-ref --count=1 refs/backup-snapshots | wc -l | tr -d ' ')
+[[ "$(cksum < "${TEST_BACKUP_ROOT}/dev/worktree-main/.git.tar")" == "${wt_archive_sum_first}" ]] \
+  || fail "unchanged mirror archive was rewritten (it would be uploaded again)"
+[[ "$(sed -n '2p' "${TEST_BACKUP_ROOT}/.pc-backup/git-mirror/dev/worktree-main.info")" == "${TEST_ROOT}/nowhere.git" ]] \
+  || fail "changed origin URL was not recorded in the info file"
+
+# gpg output differs on every run, so unchanged secrets are detected by
+# comparing plaintext. An unchanged run leaves the archive and history alone.
+[[ "$(cksum < "${secrets_latest}")" == "${secrets_sum_first}" ]] \
+  || fail "unchanged secrets archive was rewritten"
+[[ "$(ls "${secrets_history}" | wc -l | tr -d ' ')" == "${secrets_history_first}" ]] \
+  || fail "unchanged secrets created a new history copy"
+# No plaintext secrets may be left in the destination work area.
+[[ -z "$(find "${TEST_BACKUP_ROOT}/.pc-backup" -name 'secrets*.tar' 2>/dev/null)" ]] \
+  || fail "plaintext secrets archive was left in the destination"
+printf 'added later\n' > "${TEST_HOME}/.secret-data/added-later.txt"
+HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" </dev/null >/dev/null 2>&1
+[[ "$(cksum < "${secrets_latest}")" != "${secrets_sum_first}" ]] \
+  || fail "changed secrets were not archived again"
+[[ "$(ls "${secrets_history}" | wc -l | tr -d ' ')" == "$((secrets_history_first + 1))" ]] \
+  || fail "changed secrets did not create a history copy"
+snapshot_count=$(git -C "$(mirror_view dev/project)" for-each-ref --count=1 refs/backup-snapshots | wc -l | tr -d ' ')
 [[ "${snapshot_count}" -gt 0 ]] || fail "pre-update Git refs were not preserved"
 [[ ! -e "${TEST_BACKUP_ROOT}/Documents/deleted-after-first.txt" ]] \
   || fail "deleted regular file remained in backup"
@@ -319,6 +371,8 @@ git -C "${TEST_HOME}/dev/unborn-project" rev-parse --verify --quiet HEAD >/dev/n
   || fail "Unix socket from secret data was unexpectedly restored"
 [[ "$(git -C "${TEST_HOME}/dev/project" branch --show-current)" == "main" ]] \
   || fail "Git branch was not restored"
+[[ "$(git -C "${TEST_HOME}/dev/worktree-main" remote get-url origin)" == "${TEST_ROOT}/nowhere.git" ]] \
+  || fail "origin URL from the mirror info file was not restored"
 [[ "$(cat "${TEST_HOME}/dev/url-project/README.md")" == "remote-backed" ]] \
   || fail "URL-only repository was not restored"
 [[ "$(git -C "${TEST_HOME}/dev/url-project" rev-parse HEAD)" == "${url_recorded_head}" ]] \
@@ -354,6 +408,45 @@ rm -rf -- "${TEST_HOME}"
 mv "${TEST_ROOT}/restored-home" "${TEST_HOME}"
 mv "${TEST_ROOT}/url-project-remote.git.away" "${TEST_ROOT}/url-project-remote.git"
 
+# Restore also handles directory-format mirrors written by earlier versions,
+# prefers <repo>/.git.tar when both exist, and --dry-run writes nothing.
+legacy_root="${TEST_ROOT}/backup-legacy"
+rm -rf -- "${legacy_root}"
+cp -R "${TEST_BACKUP_ROOT}" "${legacy_root}"
+legacy_extract="${TEST_ROOT}/legacy-extract"
+rm -rf -- "${legacy_extract}"
+mkdir -p "${legacy_extract}/unborn" "${legacy_extract}/linked"
+# unborn-project: directory format only (no archive, no companion files)
+tar -xf "${legacy_root}/dev/unborn-project/.git.tar" -C "${legacy_extract}/unborn"
+mv "${legacy_extract}/unborn/mirror" "${legacy_root}/dev/unborn-project/.git"
+rm -f "${legacy_root}/dev/unborn-project/.git.tar" \
+  "${legacy_root}/.pc-backup/git-mirror/dev/unborn-project.info" \
+  "${legacy_root}/.pc-backup/git-mirror/dev/unborn-project.refs"
+# worktree-linked: both formats
+tar -xf "${legacy_root}/dev/worktree-linked/.git.tar" -C "${legacy_extract}/linked"
+mv "${legacy_extract}/linked/mirror" "${legacy_root}/dev/worktree-linked/.git"
+
+mv "${TEST_HOME}" "${TEST_ROOT}/home-before-legacy"
+mkdir -p "${TEST_HOME}"
+legacy_output="${TEST_ROOT}/restore-legacy.log"
+TEST_BACKUP_ROOT="${legacy_root}" env -u PC_BACKUP_CONFIG PC_BACKUP_PYTHON="${TEST_PYTHON}" HOME="${TEST_HOME}" \
+  "${TEST_ROOT}/restored-tool/scripts/restore.sh" --dry-run --git >"${legacy_output}" 2>&1 \
+  || fail "restore --dry-run failed"
+grep -q 'Git restore: dev/project/.git.tar -> ' "${legacy_output}" \
+  || fail "restore --dry-run did not list the mirror archive"
+[[ -z "$(ls -A "${TEST_HOME}")" ]] || fail "restore --dry-run wrote to the home directory"
+TEST_BACKUP_ROOT="${legacy_root}" env -u PC_BACKUP_CONFIG PC_BACKUP_PYTHON="${TEST_PYTHON}" HOME="${TEST_HOME}" \
+  "${TEST_ROOT}/restored-tool/scripts/restore.sh" --yes --git >"${legacy_output}" 2>&1 \
+  || { cat "${legacy_output}"; fail "restore from directory-format mirrors failed"; }
+[[ "$(cat "${TEST_HOME}/dev/unborn-project/local-only.txt")" == "unborn local data" ]] \
+  || fail "directory-format mirror was not restored"
+grep -q 'Old directory-format Git mirror skipped (archive exists): dev/worktree-linked/.git' "${legacy_output}" \
+  || fail "directory-format mirror next to an archive was not skipped"
+[[ "$(git -C "${TEST_HOME}/dev/project" branch --show-current)" == "main" ]] \
+  || fail "archive next to directory-format mirrors was not restored"
+rm -rf -- "${TEST_HOME}" "${legacy_root}" "${legacy_extract}"
+mv "${TEST_ROOT}/home-before-legacy" "${TEST_HOME}"
+
 # A repository switched from git-mirror to git-url leaves its old mirror in the
 # destination, which restore would prefer over the git-url record. It is removed
 # only after confirmation: check and dry-run leave it alone (dry-run reports
@@ -369,7 +462,7 @@ PC_BACKUP_CHECK_ONLY=1 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" \
 grep -q 'stale Git mirror' "${stale_output}" && fail "check inspected a stale Git mirror"
 PC_BACKUP_DRY_RUN=1 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" \
   </dev/null >"${stale_output}" 2>&1
-grep -q 'would ask to remove stale Git mirror (now git-url): dev/url-project/.git' "${stale_output}" \
+grep -q 'would ask to remove stale Git mirror (git-url): dev/url-project/.git' "${stale_output}" \
   || fail "dry-run did not report the stale Git mirror"
 [[ -d "${stale_mirror}" ]] || fail "dry-run removed the stale Git mirror"
 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" </dev/null >"${stale_output}" 2>&1 \
@@ -382,6 +475,40 @@ PC_BACKUP_ASSUME_YES=1 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" \
 [[ ! -e "${stale_mirror}" ]] || fail "confirmed stale Git mirror was not removed"
 [[ -f "${TEST_BACKUP_ROOT}/.pc-backup/git-url/dev/url-project.repo-info" ]] \
   || fail "git-url record was lost when removing the stale mirror"
+
+# Same for an archive (<repo>/.git.tar and its companion files) left from before
+# the repository became git-url.
+stale_work="${TEST_ROOT}/stale-archive"
+rm -rf -- "${stale_work}"
+mkdir -p "${stale_work}"
+git clone -q --mirror "${TEST_HOME}/dev/url-project" "${stale_work}/mirror"
+git -C "${stale_work}/mirror" config backup.mode git-mirror
+tar -cf "${TEST_BACKUP_ROOT}/dev/url-project/.git.tar" -C "${stale_work}" mirror
+mkdir -p "${TEST_BACKUP_ROOT}/.pc-backup/git-mirror/dev"
+printf 'stale\n' > "${TEST_BACKUP_ROOT}/.pc-backup/git-mirror/dev/url-project.refs"
+printf 'stale\n' > "${TEST_BACKUP_ROOT}/.pc-backup/git-mirror/dev/url-project.info"
+HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" </dev/null >"${stale_output}" 2>&1 \
+  || fail "non-interactive backup failed over a stale Git mirror archive"
+[[ -f "${TEST_BACKUP_ROOT}/dev/url-project/.git.tar" ]] || fail "unconfirmed stale archive was removed"
+PC_BACKUP_ASSUME_YES=1 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" \
+  </dev/null >"${stale_output}" 2>&1
+[[ ! -e "${TEST_BACKUP_ROOT}/dev/url-project/.git.tar" \
+  && ! -e "${TEST_BACKUP_ROOT}/.pc-backup/git-mirror/dev/url-project.refs" \
+  && ! -e "${TEST_BACKUP_ROOT}/.pc-backup/git-mirror/dev/url-project.info" ]] \
+  || fail "confirmed stale archive and its companion files were not removed"
+
+# Migration: a directory-format mirror (earlier versions) next to the archive of
+# a git-mirror repository is removed after confirmation; the archive stays.
+legacy_dir="${TEST_BACKUP_ROOT}/dev/worktree-main/.git"
+cp -R "$(mirror_view dev/worktree-main)" "${legacy_dir}"
+HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" </dev/null >"${stale_output}" 2>&1 \
+  || fail "non-interactive backup failed over a directory-format mirror"
+grep -q 'stale Git mirror kept' "${stale_output}" || fail "directory-format mirror was not reported"
+[[ -d "${legacy_dir}" ]] || fail "unconfirmed directory-format mirror was removed"
+PC_BACKUP_ASSUME_YES=1 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" \
+  </dev/null >"${stale_output}" 2>&1
+[[ ! -e "${legacy_dir}" && -f "${TEST_BACKUP_ROOT}/dev/worktree-main/.git.tar" ]] \
+  || fail "directory-format mirror was not replaced by the archive"
 
 # An rsync failure (exit 23: a file that cannot be read) is a backup failure,
 # and its cause is shown in the log instead of only in the change record.
@@ -412,7 +539,6 @@ cp -R "${TEST_HOME}/dev/project" "${project_copy}"
 mkdir -p "${linked_copy}" "$(dirname -- "${stale_full_info}")"
 printf 'gitdir: /nonexistent/worktrees/linked\n' > "${linked_copy}/.git"
 printf 'stale\n' > "${stale_full_info}"
-nonbare_refs_before=$(git -C "${mirror}" for-each-ref | cksum)
 nonbare_output="${TEST_ROOT}/nonbare-backup.log"
 if HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" \
   </dev/null >"${nonbare_output}" 2>&1; then
@@ -420,16 +546,19 @@ if HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" \
 fi
 [[ "$(grep -c 'existing Git destination is not a bare repository' "${nonbare_output}")" -eq 2 ]] \
   || fail "non-bare Git destinations were not reported"
-[[ "$(git -C "${mirror}" for-each-ref | cksum)" == "${nonbare_refs_before}" ]] \
-  || fail "non-bare Git destination refs were modified"
-[[ -f "${linked_copy}/.git" ]] || fail "unconfirmed .git file destination was modified"
+[[ -f "${project_copy}/tracked.txt" && ! -e "${project_copy}/.git.tar" ]] \
+  || fail "non-bare Git destination was modified without confirmation"
+[[ -f "${linked_copy}/.git" && ! -e "${linked_copy}/.git.tar" ]] \
+  || fail "unconfirmed .git file destination was modified"
 
 PC_BACKUP_ASSUME_YES=1 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/backup.sh" </dev/null
 HOME="${TEST_HOME}" "${PROJECT_ROOT}/scripts/verify-backup.sh"
-[[ "$(git -C "${mirror}" rev-parse --is-bare-repository)" == "true" ]] \
-  || fail "non-bare Git destination was not replaced by a mirror"
-[[ "$(git -C "${linked_copy}/.git" rev-parse --is-bare-repository)" == "true" ]] \
-  || fail ".git file destination was not replaced by a mirror"
+[[ "$(git -C "$(mirror_view dev/project)" rev-parse --is-bare-repository)" == "true" \
+  && ! -e "${project_copy}/.git" ]] \
+  || fail "non-bare Git destination was not replaced by a mirror archive"
+[[ "$(git -C "$(mirror_view dev/worktree-linked)" rev-parse --is-bare-repository)" == "true" \
+  && ! -e "${linked_copy}/.git" ]] \
+  || fail ".git file destination was not replaced by a mirror archive"
 [[ ! -e "${project_copy}/tracked.txt" ]] \
   || fail "working tree of the replaced copy remained"
 [[ "$(cat "${project_copy}/local-config.yaml")" == "local config" ]] \
